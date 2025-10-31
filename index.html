@@ -1,0 +1,1281 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Kiosk 廣告機</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: #000;
+        color: #fff;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        overflow: hidden;
+        cursor: none;
+      }
+
+      /* 旋轉容器，確保可滿版自適應 */
+      #rotate-container {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vh; /* 旋轉後用 vh 代替 */
+        height: 100vw;
+        transform-origin: top left;
+      }
+
+      /* 廣告背景 */
+      .ad-container {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 1;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        overflow: hidden;
+      }
+
+      .ad-image {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        opacity: 0;
+        transition: opacity 1.5s ease-in-out;
+      }
+      .ad-image.visible {
+        opacity: 1;
+      }
+
+      /* 前景 overlay */
+      .overlay {
+        position: absolute;
+        left: 0;
+        width: 100%;
+        z-index: 10;
+      }
+
+      /* 跑馬燈 */
+      .marquee-container {
+        height: 11vh;
+        top: 0;
+        left: 0;
+      }
+      .marquee-text {
+        font-size: 11vh;
+        font-weight: bold;
+        color: #fff;
+        white-space: nowrap;
+        display: inline-block;
+        animation: marquee 20s linear infinite;
+      }
+      @keyframes marquee {
+        0% {
+          transform: translateX(100vh);
+        }
+        100% {
+          transform: translateX(calc(-1 * 100% - 100vh));
+        }
+      }
+
+      /* Footer */
+      .footer-container {
+        position: absolute;
+        bottom: 0;
+        height: 30px;
+        width: 100%;
+        background: rgba(0, 0, 0, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: space-around;
+        font-size: 0.9em;
+        font-family: monospace;
+      }
+
+      .modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.75);
+        z-index: 1000;
+        display: none;
+        justify-content: center;
+        align-items: center;
+      }
+      .modal-content {
+        width: 80%;
+        max-width: 500px;
+        padding: 20px;
+      }
+      .info-panel {
+        background-image: linear-gradient(to bottom, #1a2a6c, #001040);
+        border: 4px solid;
+        border-image: linear-gradient(to bottom, #f7d76f, #b88a44) 1;
+        border-radius: 20px;
+        padding: 30px;
+        color: white;
+        font-size: 1.8em;
+        box-shadow: 0 0 15px rgba(255, 223, 135, 0.5),
+          inset 0 0 10px rgba(0, 0, 0, 0.5);
+        text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
+      }
+      .info-panel p {
+        margin: 0 0 20px 0;
+        display: flex;
+        justify-content: space-between;
+      }
+      .info-panel p:last-child {
+        margin-bottom: 0;
+      }
+      .info-panel span {
+        font-weight: bold;
+        color: #f1c40f;
+      }
+      .modal-error-message {
+        color: #ff4d4d;
+        font-size: 0.8em;
+        font-weight: bold;
+        text-align: center;
+        margin-top: 15px;
+        display: none;
+      }
+      .modal-buttons {
+        display: flex;
+        justify-content: space-around;
+        margin-top: 30px;
+      }
+      .modal-btn {
+        border: 3px solid #b88a44;
+        border-radius: 15px;
+        padding: 15px 10px;
+        font-size: 1.8em;
+        font-weight: bold;
+        color: white;
+        cursor: pointer;
+        text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.4);
+        transition: all 0.2s ease;
+        width: 40%;
+      }
+      .modal-btn:active {
+        transform: translateY(2px);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+      }
+      .btn-confirm {
+        background: linear-gradient(to bottom, #ee9a73, #ff2620);
+      }
+      .btn-continue {
+        background: linear-gradient(to bottom, #ffc8a5, #fb7a08);
+      }
+      .toast-notification {
+        pointer-events: none;
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        padding: 20px 40px;
+        background-color: rgba(231, 76, 60, 0.9);
+        color: white;
+        border-radius: 10px;
+        z-index: 2000;
+        font-size: 2em;
+        opacity: 0;
+        transition: opacity 0.5s ease;
+      }
+      .toast-notification.success {
+        background-color: rgba(46, 204, 113, 0.9);
+      }
+      #toast {
+        z-index: 2001;
+      }
+      .progress-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.85);
+        z-index: 2000;
+        display: none;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        color: white;
+        text-align: center;
+      }
+      .progress-content h2 {
+        font-size: 2.5em;
+        margin-bottom: 20px;
+      }
+      .progress-content p {
+        font-size: 1.5em;
+        margin-bottom: 30px;
+      }
+      .progress-bar-container {
+        width: 80%;
+        max-width: 600px;
+        height: 30px;
+        background-color: #555;
+        border-radius: 15px;
+        overflow: hidden;
+      }
+      .progress-bar {
+        width: 0%;
+        height: 100%;
+        background-color: #2ecc71;
+        transition: width 0.5s ease;
+      }
+      .ripple {
+        position: absolute;
+        border-radius: 50%;
+        border: 0.8rem solid rgba(255, 253, 253, 0.61);
+        transform: scale(0);
+        animation: ripple-wave 0.4s ease-out forwards;
+        pointer-events: none;
+        z-index: 2001;
+      }
+      @keyframes ripple-wave {
+        to {
+          transform: scale(2.5);
+          opacity: 0;
+        }
+      }
+
+      @keyframes flashRed {
+        0% {
+          color: red;
+        }
+        50% {
+          color: red;
+        }
+        100% {
+          color: #f1c40f;
+        }
+      }
+
+      /* Identity Confirm Modal Styles */
+      .identity-modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.75);
+        z-index: 1001;
+        display: none;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+        box-sizing: border-box;
+      }
+
+      .identity-modal-content {
+        position: relative;
+        width: 90%;
+        max-width: 500px;
+        background-image: linear-gradient(to bottom, #1a2a6c, #001040);
+        border: 4px solid;
+        border-image: linear-gradient(to bottom, #f7d76f, #b88a44) 1;
+        border-radius: 20px;
+        box-shadow: 0 0 15px rgba(255, 223, 135, 0.5),
+          inset 0 0 10px rgba(0, 0, 0, 0.5);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .identity-modal-title {
+        color: #f1c40f;
+        font-size: 3rem;
+        font-weight: bold;
+        text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
+        margin: 0;
+        text-align: center;
+        padding: 30px 30px 20px 30px;
+        border-bottom: 2px solid rgba(255, 223, 135, 0.3);
+        flex-shrink: 0;
+      }
+
+      /* Body */
+      .identity-modal-body {
+        padding: 20px;
+        text-align: center;
+      }
+
+      .identity-member-info {
+        color: white;
+        font-size: 2.5rem;
+        text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
+        margin: 10px 0;
+      }
+
+      /* Footer */
+      .identity-modal-footer {
+        padding: 0 10px;
+        border-top: 2px solid rgba(255, 223, 135, 0.3);
+        display: flex;
+        justify-content: center;
+        font-size: 2rem;
+        color: #ff5656;
+      }
+
+      .identity-btn-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        justify-items: center;
+        align-items: center;
+        margin-top: 20px;
+      }
+
+      /* .identity-btn-grid button:nth-child(4) {
+        grid-column: 2; 
+      }
+      .identity-btn-grid button:nth-child(5) {
+        grid-column: 3; 
+      } */
+
+      .identity-btn {
+        background: linear-gradient(to bottom, #71aefd, #2282ff);
+        width: 100%;
+        padding: 15px 20px;
+      }
+
+      .identity-btn:active {
+        transform: scale(0.95);
+      }
+
+      /* Transaction Detail Modal Styles */
+      .transaction-modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.75);
+        z-index: 1001;
+        display: none;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+        box-sizing: border-box;
+      }
+
+      .transaction-modal-content {
+        position: relative;
+        width: 90%;
+        max-width: 600px;
+        max-height: 60vw;
+        background-image: linear-gradient(to bottom, #1a2a6c, #001040);
+        border: 4px solid;
+        border-image: linear-gradient(to bottom, #f7d76f, #b88a44) 1;
+        border-radius: 20px;
+        box-shadow: 0 0 15px rgba(255, 223, 135, 0.5),
+          inset 0 0 10px rgba(0, 0, 0, 0.5);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .transaction-modal-header {
+        padding: 30px 30px 20px 30px;
+        border-bottom: 2px solid rgba(255, 223, 135, 0.3);
+        flex-shrink: 0;
+      }
+
+      .transaction-modal-title {
+        color: #f1c40f;
+        font-size: 2.5em;
+        font-weight: bold;
+        text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
+        margin: 0;
+        text-align: center;
+      }
+
+      .transaction-member-info {
+        color: white;
+        font-size: 2em;
+        text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
+        margin: 5px 0 0 0;
+        text-align: center;
+      }
+
+      .transaction-modal-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px 30px 30px 30px;
+      }
+
+      .transaction-detail-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+
+      .transaction-detail-item {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        padding: 15px 20px;
+        margin-bottom: 15px;
+        border-left: 4px solid #f1c40f;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+      }
+
+      .transaction-detail-item:last-child {
+        margin-bottom: 0;
+      }
+
+      .transaction-item-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+        color: white;
+        font-size: 1.5em;
+        text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+      }
+
+      .transaction-item-row:last-child {
+        margin-bottom: 0;
+      }
+
+      .transaction-item-label {
+        font-weight: normal;
+        color: #ffffff;
+      }
+
+      .transaction-item-value {
+        font-weight: bold;
+        color: #f1c40f;
+      }
+
+      .transaction-close-btn {
+        position: absolute;
+        top: 15px;
+        right: 15px;
+        background: rgba(231, 76, 60, 0.8);
+        color: white;
+        border: none;
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        cursor: pointer;
+        font-size: 2.3em;
+        font-weight: bold;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+        transition: all 0.2s ease;
+        z-index: 1002;
+      }
+
+      .transaction-close-btn:hover {
+        background: rgba(231, 76, 60, 1);
+        transform: scale(1.1);
+      }
+
+      .transaction-close-btn:active {
+        transform: scale(0.95);
+      }
+      /* Scrollbar styles for transaction modal */
+      .transaction-modal-body::-webkit-scrollbar {
+        width: 8px;
+      }
+
+      .transaction-modal-body::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 4px;
+      }
+
+      .transaction-modal-body::-webkit-scrollbar-thumb {
+        background: rgba(241, 196, 15, 0.6);
+        border-radius: 4px;
+      }
+
+      .transaction-modal-body::-webkit-scrollbar-thumb:hover {
+        background: rgba(241, 196, 15, 0.8);
+      }
+
+      .flash-red {
+        animation: flashRed 0.4s;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="rotate-container">
+      <div class="ad-container" id="ad-container"></div>
+      <div class="overlay marquee-container">
+        <div class="marquee-text" id="marquee-text">歡迎光臨！!</div>
+      </div>
+      <div class="overlay footer-container" id="system-info-footer">
+        <span>IP: <span id="ip-address">...</span></span>
+        <span>CPU: <span id="cpu-usage">...</span>%</span>
+        <span>儲存: <span id="disk-usage">...</span>%</span>
+        <span>溫度: <span id="cpu-temp">...</span>°C</span>
+        <span>ID: <span id="deviceID">...</span></span>
+      </div>
+      <div class="identity-modal-overlay" id="identity-confirm-modal"></div>
+      <div class="modal-overlay" id="deposit-modal">
+        <div class="modal-content">
+          <div class="info-panel">
+            <p>會員帳號：<span id="modal-account"></span></p>
+            <p>會員名稱：<span id="modal-name"></span></p>
+            <p>帳號點數：<span id="modal-points"></span></p>
+            <p>本次儲值：<span id="modal-deposit">0</span></p>
+            <p>點數餘額：<span id="modal-balance"></span></p>
+            <p id="modal-error" class="modal-error-message"></p>
+          </div>
+          <div class="modal-buttons">
+            <button
+              class="modal-btn btn-continue"
+              onclick="startCountdown(this, 15, '續儲', handleConfirm)"
+            >
+              續儲
+            </button>
+            <button class="modal-btn btn-confirm" onclick="handleConfirm()">
+              確認
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="transaction-modal-overlay" id="transaction-detail-modal">
+        <div class="transaction-modal-content">
+          <button
+            class="transaction-close-btn"
+            onclick="closeTransactionModal()"
+          >
+            ×
+          </button>
+          <div class="transaction-modal-header">
+            <h2 class="transaction-modal-title">交易明細</h2>
+            <div
+              class="transaction-member-info"
+              id="transaction-member-info"
+            ></div>
+          </div>
+          <div class="transaction-modal-body">
+            <ul class="transaction-detail-list" id="transaction-detail-list">
+              <!-- Transaction items will be populated here -->
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div id="toast" class="toast-notification"></div>
+      <div id="toast2" class="toast-notification"></div>
+      <div class="progress-overlay" id="progress-overlay">
+        <div class="progress-content">
+          <h2 id="progress-title">正在更新廣告內容</h2>
+          <p id="progress-message">請稍候...</p>
+          <div class="progress-bar-container">
+            <div class="progress-bar" id="progress-bar"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 計算容器尺寸 -->
+    <script>
+      function resizeRotateContainer() {
+        const container = document.getElementById("rotate-container");
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+
+        // 旋轉 270 度後，需要交換寬高
+        container.style.width = `${vh}px`;
+        container.style.height = `${vw}px`;
+
+        // 計算 translateX 偏移量：把旋轉後的寬度平移回螢幕
+        container.style.transform = `rotate(90deg) translatey(-${vw}px)`;
+      }
+
+      window.addEventListener("resize", resizeRotateContainer);
+      window.addEventListener("load", resizeRotateContainer);
+    </script>
+
+    <!-- 觸控效果 -->
+    <script>
+      document.addEventListener("click", function (e) {
+        // for (let i = 0; i < 1; i++) {
+        const ripple = document.createElement("span");
+        ripple.classList.add("ripple");
+
+        const size = 60;
+        ripple.style.width = ripple.style.height = size + "px";
+        ripple.style.left = e.pageX - size / 2 + "px";
+        ripple.style.top = e.pageY - size / 2 + "px";
+
+        // 延遲一點讓它變成「同心多圈」
+        // ripple.style.animationDelay = i * 0.3 + "s";
+
+        document.body.appendChild(ripple);
+        ripple.addEventListener("animationend", () => ripple.remove());
+        // }
+      });
+    </script>
+    <script>
+      const adContainer = document.getElementById("ad-container");
+      const marqueeTextEl = document.getElementById("marquee-text");
+      const ipAddressEl = document.getElementById("ip-address");
+      const cpuUsageEl = document.getElementById("cpu-usage");
+      const diskUsageEl = document.getElementById("disk-usage");
+      const cpuTempEl = document.getElementById("cpu-temp");
+      const deviceIDEl = document.getElementById("deviceID");
+      const depositModal = document.getElementById("deposit-modal");
+      const modalAccount = document.getElementById("modal-account");
+      const modalName = document.getElementById("modal-name");
+      const modalPoints = document.getElementById("modal-points");
+      const modalDeposit = document.getElementById("modal-deposit");
+      const modalBalance = document.getElementById("modal-balance");
+      const modalError = document.getElementById("modal-error");
+      const toast = document.getElementById("toast");
+      const toast2 = document.getElementById("toast2");
+      const progressOverlay = document.getElementById("progress-overlay");
+      const progressTitle = document.getElementById("progress-title");
+      const progressMessage = document.getElementById("progress-message");
+      const progressBar = document.getElementById("progress-bar");
+
+      let adList = [];
+      let currentAdIndex = 0;
+      let slideshowTimeout;
+      let currentDeposit = 0;
+      let depositDetails = [];
+      let currentMemberInfo = null;
+      let lastKeyTime = Date.now();
+      let qr_locked = 0;
+
+      // --- 廣告輪播邏輯 ---
+      function startSlideshow() {
+        clearTimeout(slideshowTimeout);
+        if (adList.length === 0) {
+          adContainer.innerHTML =
+            '<div style="width:100%;height:100%;display:flex;justify-content:center;align-items:center;color:#555;font-size:2em;">等待廣告內容...</div>';
+          return;
+        }
+        showNextAd();
+      }
+
+      function showNextAd() {
+        clearTimeout(slideshowTimeout);
+        if (adList.length === 0) return;
+
+        const currentAd = adList[currentAdIndex];
+        const nextIndex = (currentAdIndex + 1) % adList.length; // 【重要】先計算下一個索引
+
+        // 找到當前應該顯示的元素
+        const allElements = adContainer.querySelectorAll(".ad-image");
+        const currentElement = allElements[currentAdIndex];
+
+        if (!currentElement) {
+          console.error("找不到索引為", currentAdIndex, "的元素");
+          return;
+        }
+
+        // 處理所有元素的資源管理
+        allElements.forEach((el, index) => {
+          if (index === currentAdIndex) {
+            // 當前元素:顯示
+            return; // 稍後處理
+          }
+
+          // 移除 visible class
+          el.classList.remove("visible");
+
+          if (el.tagName.toLowerCase() === "video") {
+            if (index === nextIndex) {
+              // 下一個影片:預載(如果還沒載入)
+              const nextAd = adList[nextIndex];
+              if (!el.src || el.src === window.location.href) {
+                el.src = `${nextAd.file}?t=${new Date().getTime()}`;
+                el.load();
+              }
+            } else {
+              // 其他影片:釋放資源
+              setTimeout(() => {
+                el.pause();
+                el.currentTime = 0;
+                el.removeAttribute("src");
+                el.load();
+              }, 1000); // 等待淡出動畫
+            }
+          }
+        });
+
+        // 顯示當前元素
+        if (currentElement.tagName.toLowerCase() === "video") {
+          // 確保影片有 src
+          if (
+            !currentElement.src ||
+            currentElement.src === window.location.href
+          ) {
+            currentElement.src = `${currentAd.file}?t=${new Date().getTime()}`;
+            currentElement.load();
+          }
+          currentElement.currentTime = 0;
+          currentElement.classList.add("visible");
+
+          // 確保影片播放
+          currentElement.play().catch((e) => {
+            if (e.name !== "AbortError") {
+              console.error("影片播放失敗:", currentAd.file, e);
+            }
+          });
+        } else {
+          // 圖片直接顯示
+          currentElement.classList.add("visible");
+        }
+
+        const durationInMs = (currentAd.duration || 10) * 1000;
+        slideshowTimeout = setTimeout(() => {
+          currentAdIndex = (currentAdIndex + 1) % adList.length;
+          showNextAd();
+        }, durationInMs);
+      }
+      function updateAd(newAdList) {
+        adList = newAdList;
+        currentAdIndex = 0;
+
+        // 清理舊的影片資源
+        const oldVideos = adContainer.querySelectorAll("video");
+        oldVideos.forEach((video) => {
+          video.pause();
+          video.removeAttribute("src");
+          video.load();
+        });
+
+        adContainer.innerHTML = "";
+
+        adList.forEach((ad) => {
+          if (ad.file.endsWith(".mp4")) {
+            const video = document.createElement("video");
+            video.className = "ad-image";
+            video.src = `${ad.file}?t=${new Date().getTime()}`;
+            video.autoplay = false; // 改為 false,由 showNextAd 控制播放
+            video.muted = true;
+            video.loop = false; // 改為 false,避免重複播放干擾切換
+            video.playsInline = true;
+            video.preload = "auto"; // 預載影片
+            adContainer.appendChild(video);
+          } else {
+            const img = document.createElement("img");
+            img.className = "ad-image";
+            img.dataset.file = ad.file;
+            img.src = `${ad.file}?t=${new Date().getTime()}`;
+            adContainer.appendChild(img);
+          }
+        });
+
+        startSlideshow();
+      }
+
+      //身分確認
+      function showIdentityConfirmModal(data) {
+        const modal = document.getElementById("identity-confirm-modal");
+        modal.style.display = "flex";
+        modal.style.flexDirection = "column";
+        modal.innerHTML = `
+              <div class="identity-modal-content">
+                <div class="identity-modal-title">身分確認</div>
+                <div class="identity-modal-body">
+                  <p class="identity-member-info"><strong>${
+                    data.acc
+                  }</strong></p>
+                </div>
+                <div class="identity-modal-footer">
+                  <p>請選擇您的帳號末三碼</p>
+                </div>
+              </div>
+              <div class="identity-btn-grid">
+                ${Array.from({ length: 6 })
+                  .map(
+                    (_, i) =>
+                      `<button class="modal-btn identity-btn" data-idx="${i}">按鈕 ${
+                        i + 1
+                      }</button>`
+                  )
+                  .join("")}
+              </div>
+            `;
+
+        const buttons = document.querySelectorAll(".identity-btn");
+        // --- 產生亂碼用的輔助函式 ---
+        function generateCode() {
+          const chars = "0123456789";
+          let code = "";
+          for (let i = 0; i < 3; i++) {
+            code += chars[Math.floor(Math.random() * chars.length)];
+          }
+          return code;
+        }
+
+        // --- 建立唯一亂碼集合 ---
+        const usedCodes = new Set();
+        usedCodes.add(data.randomCode);
+
+        const codes = [];
+        for (let i = 0; i < 6; i++) {
+          let code;
+          do {
+            code = generateCode();
+          } while (usedCodes.has(code));
+          usedCodes.add(code);
+          codes.push(code);
+        }
+
+        // --- 隨機挑一個按鈕放真正 randomCode ---
+        const availableIndices = [0, 2, 3, 4, 5]; // 排除索引 1
+        const correctIndex =
+          availableIndices[Math.floor(Math.random() * availableIndices.length)];
+        codes[correctIndex] = data.acc.slice(-3);
+
+        // --- 寫入到按鈕 ---
+        buttons.forEach((btn, idx) => {
+          if (idx === 1) {
+            btn.style.height = buttons[0].offsetHeight + "px";
+            btn.style.display = "flex";
+            btn.style.justifyContent = "center";
+            btn.style.alignItems = "center";
+            btn.disabled = true;
+            btn.style.cursor = "default";
+            btn.style.border = "none";
+            btn.style.background = "transparent";
+            btn.style.boxShadow = "none";
+            btn.style.padding = "0";
+
+            startCountdown(btn, 9, "", () => {
+              modal.style.display = "none";
+              currentMemberInfo = null;
+              if (window.ws) {
+                window.ws.send(
+                  JSON.stringify({
+                    action: "indentity_confirm_timeout",
+                  })
+                );
+              }
+            });
+          } else {
+            btn.textContent = codes[idx];
+            btn.dataset.code = codes[idx];
+            btn.onclick = () => {
+              if (idx === correctIndex) {
+                console.log("✅ 身分確認成功:", codes[idx]);
+                showToast("驗證成功", true);
+                showDepositModal(data);
+              } else {
+                console.log("❌ 身分確認錯誤:", codes[idx]);
+                if (window.ws) {
+                  window.ws.send(
+                    JSON.stringify({
+                      action: "indentity_confirm_timeout",
+                    })
+                  );
+                }
+                showToast("身分認證錯誤，請重新登入！");
+              }
+              modal.style.display = "none";
+            };
+          }
+        });
+
+        // confirm.onclick = () => {
+        //   showDepositModal(data);
+        //   modal.style.display = "none";
+        // };
+        // startCountdown(confirm, 5, "確認", () => {
+        //   modal.style.display = "none";
+        //   currentMemberInfo = null;
+        //   if (window.ws) {
+        //     window.ws.send(
+        //       JSON.stringify({
+        //         action: "indentity_confirm_timeout",
+        //       })
+        //     );
+        //   }
+        // });
+      }
+
+      // 顯示交易明細 Modal
+      function showTransactionModal(transactionData) {
+        const modal = document.getElementById("transaction-detail-modal");
+        const memberInfo = document.getElementById("transaction-member-info");
+        const detailList = document.getElementById("transaction-detail-list");
+
+        // 設定會員資訊 (最上面置中是玩家跟帳號)
+        const member = transactionData.member[0];
+        memberInfo.textContent = `${member.MD001} (${member.MD003})`;
+        // 清空並填充交易明細
+        detailList.innerHTML = "";
+
+        transactionData.data.forEach((transaction) => {
+          const listItem = document.createElement("li");
+          listItem.className = "transaction-detail-item";
+
+          listItem.innerHTML = `
+                  <div class="transaction-item-row">
+                    <span class="transaction-item-label">交易時間：</span>
+                    <span class="transaction-item-value">${transaction.CreateDate}</span>
+                  </div>
+                  <div class="transaction-item-row">
+                    <span class="transaction-item-label">交易單號：</span>
+                    <span class="transaction-item-value">${transaction.IndexNo}</span>
+                  </div>
+                  <div class="transaction-item-row">
+                    <span class="transaction-item-label">加值金額：</span>
+                    <span class="transaction-item-value">NT$ ${transaction.PL004}</span>
+                  </div>
+                `;
+
+          detailList.appendChild(listItem);
+          listItem.addEventListener("click", () => {
+            if (window.ws) {
+              window.ws.send(
+                JSON.stringify({
+                  action: "get_transaction_screenshot",
+                  data: {
+                    IndexNo: transaction.IndexNo,
+                    Date: transaction.CreateDate,
+                  },
+                })
+              );
+            }
+          });
+        });
+        // 顯示 Modal
+        modal.style.display = "flex";
+      }
+      // 關閉交易明細 Modal
+      function closeTransactionModal() {
+        const modal = document.getElementById("transaction-detail-modal");
+        modal.style.display = "none";
+        if (window.ws) {
+          window.ws.send(
+            JSON.stringify({
+              action: "close_transaction_modal",
+            })
+          );
+        }
+      }
+      // ESC 鍵關閉 Modal
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") {
+          closeTransactionModal();
+        }
+      });
+
+      // 開啟交易明細畫面截圖
+      function openTransactionScreenshot(path) {
+        const modal = document.getElementById("transaction-detail-modal");
+        screenShotContainer = document.createElement("div");
+        screenShotContainer.innerHTML = `
+              <div style="position:relative;width:100%;height:0;padding-bottom:56.25%;">
+                <img
+                  src="${path}"
+                  style="
+                    position: absolute;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%) rotate(270deg);
+                    transform-origin: center center;
+                    max-width: 140vh;
+                    max-height: 90vw;
+                    object-fit: contain;
+                    border-radius: 8px;
+                    box-shadow: 0 0 20px rgba(0,0,0,0.8);
+                  "
+                />
+              </div>
+            `;
+        screenShotContainer.style.display = "flex";
+        screenShotContainer.style.alignItems = "center";
+        screenShotContainer.style.justifyContent = "center";
+        screenShotContainer.style.position = "fixed";
+        screenShotContainer.style.top = 0;
+        screenShotContainer.style.left = 0;
+        screenShotContainer.style.width = "100%";
+        screenShotContainer.style.height = "100%";
+        screenShotContainer.style.backgroundColor = "rgba(0,0,0,0.6)";
+        screenShotContainer.style.zIndex = 2001;
+        screenShotContainer.addEventListener("click", (e) => {
+          if (!e.target.closest("img")) {
+            screenShotContainer.remove();
+          }
+        });
+        modal.appendChild(screenShotContainer);
+      }
+
+      function showToast(message, isSuccess = false) {
+        toast.textContent = message;
+        toast.classList.toggle("success", isSuccess);
+        toast.style.opacity = "1";
+        setTimeout(() => {
+          toast.style.opacity = "0";
+        }, 3000);
+      }
+
+      const btn_confirm = document.querySelector(".btn-confirm");
+      const btn_continue = document.querySelector(".btn-continue");
+      let countdownTimer; // 全域
+      let countdown = 10;
+
+      function startCountdown(btn, sec, text, finalFunc) {
+        // 先清掉舊的計時器
+        if (countdownTimer) clearInterval(countdownTimer);
+
+        // 初始化倒數
+        countdown = sec;
+        btn.textContent = `${text} (${countdown}秒)`;
+
+        countdownTimer = setInterval(() => {
+          countdown--;
+          if (countdown <= 0) {
+            clearInterval(countdownTimer);
+            finalFunc(); // 倒數完自動執行
+            return;
+          }
+          btn.textContent = `${text} (${countdown}秒)`;
+        }, 1000);
+      }
+
+      function showDepositModal(data) {
+        if (window.ws)
+          window.ws.send(JSON.stringify({ action: "user_validated" }));
+        qr_locked = 2;
+        console.log(qr_locked);
+        currentDeposit = 0;
+        depositDetails = [];
+        currentMemberInfo = data;
+        modalError.style.display = "none";
+        modalAccount.textContent = data.acc || "N/A";
+        modalName.textContent = data.name || "N/A";
+        modalPoints.textContent = (data.point || 0).toLocaleString();
+        modalDeposit.textContent = currentDeposit.toLocaleString();
+        modalBalance.textContent = (data.point || 0).toLocaleString();
+        depositModal.style.display = "flex";
+
+        startCountdown(btn_continue, 15, "續儲", handleConfirm); // 開始倒數
+      }
+
+      // 模擬紙鈔機
+      document.addEventListener("keydown", function handleKeyPress(e) {
+        if (depositModal.style.display !== "flex") return; // modal 沒開，不處理
+
+        let amount = 0;
+        switch (e.code) {
+          case "Numpad1":
+            amount = 100;
+            break;
+          case "Numpad2":
+            amount = 200;
+            break;
+          case "Numpad3":
+            amount = 500;
+            break;
+          case "Numpad4":
+            amount = 1000;
+            break;
+          case "Numpad5":
+            amount = 2000;
+            break;
+        }
+        if (amount > 0 && currentMemberInfo) {
+          // 通知後端 (模擬 bill_inserted)
+          if (window.ws) {
+            window.ws.send(
+              JSON.stringify({
+                action: "bill_inserted_simulate",
+                data: {
+                  amount: amount,
+                },
+              })
+            );
+          }
+        }
+      });
+
+      function hideDepositModal() {
+        depositModal.style.display = "none";
+      }
+
+      function handleConfirm() {
+        // *** 修正 1: 立即停止倒數計時器 ***
+        if (countdownTimer) clearInterval(countdownTimer);
+        let pid = currentMemberInfo.pid;
+        currentMemberInfo = null;
+
+        if (qr_locked == 2) {
+          qr_locked = 0;
+          console.log(qr_locked);
+        }
+        console.log("完成儲值按鈕被點擊");
+        modalError.style.display = "none";
+
+        // *** 修正 2: 立即關閉視窗以提供即時反饋 ***
+        hideDepositModal();
+
+        // 仍然發送訊息給後端，以便後端記錄和處理
+        if (window.ws) {
+          window.ws.send(
+            JSON.stringify({
+              action: "deposit_complete",
+              data: {
+                pid: pid,
+                points: modalBalance.textContent,
+              },
+            })
+          );
+        }
+      }
+
+      // --- WebSocket 連線與事件處理 ---
+      function connect() {
+        const ws = new WebSocket("ws://localhost:8765");
+
+        ws.onopen = function () {
+          console.log("WebSocket 連線成功，正在請求初始資料...");
+          ws.send(JSON.stringify({ action: "get_initial_ads" }));
+          ws.send(JSON.stringify({ action: "get_device_lock_status" }));
+          if (depositModal.style.display === "flex" && !currentMemberInfo) {
+            console.log("檢測到 modal 開啟但會員資料遺失，強制關閉");
+            hideDepositModal();
+            qr_locked = 0;
+            showToast("連線中斷，請重新掃描會員QRCode", false);
+          }
+        };
+
+        ws.onmessage = function (event) {
+          try {
+            const msg = JSON.parse(event.data);
+
+            if (msg.event === "initial_data") {
+              console.log("收到初始資料", msg.ads);
+              updateAd(msg.ads || []);
+              if (msg.marqueeText) {
+                marqueeTextEl.textContent = msg.marqueeText;
+              }
+            } else if (msg.event === "reload_ads") {
+              // --- 關鍵修正：加入處理更新完成的邏輯 ---
+              console.log("收到廣告更新指令", msg.ads);
+              progressTitle.textContent = "更新完成";
+              progressMessage.textContent = "即將開始播放新廣告...";
+              progressBar.style.width = "100%";
+              setTimeout(() => {
+                progressOverlay.style.display = "none";
+                updateAd(msg.ads || []);
+              }, 2000); // 延遲 2 秒後隱藏
+            } else if (msg.event === "update_marquee") {
+              marqueeTextEl.textContent = msg.text;
+            } else if (msg.event === "system_info") {
+              const data = msg.data;
+              ipAddressEl.textContent = data.ip;
+              cpuUsageEl.textContent = data.cpu_usage;
+              diskUsageEl.textContent = data.disk_usage;
+              cpuTempEl.textContent = data.cpu_temp;
+              deviceIDEl.textContent = data.device_id;
+            } else if (msg.event === "member_info_valid") {
+              if (qr_locked === 2) return;
+              console.log("會員驗證成功:", msg.data);
+              showIdentityConfirmModal(msg.data);
+            } else if (msg.event === "member_info_invalid") {
+              showToast(msg.message || "會員驗證失敗");
+            } else if (msg.event === "transaction_detail") {
+              console.log(msg.data);
+              showTransactionModal(msg.data);
+            } else if (msg.event === "none_transaction_detail") {
+              showToast(msg.message || "查無交易明細");
+            } else if (msg.event === "screenshot_path") {
+              path = msg.image;
+              openTransactionScreenshot(path);
+            } else if (msg.event === "bill_inserted") {
+              depositDetails = [];
+              currentDeposit += msg.amount;
+              depositDetails.push(msg.amount);
+              const currentPoints = currentMemberInfo.point || 0;
+              modalDeposit.textContent = currentDeposit.toLocaleString();
+              modalBalance.textContent = (
+                currentPoints + currentDeposit
+              ).toLocaleString();
+              modalBalance.classList.remove("flash-red");
+              void modalBalance.offsetWidth; // 觸發重新渲染
+              modalBalance.classList.add("flash-red");
+              // 這裡立即送到後端
+              console.log(currentMemberInfo);
+              if (currentMemberInfo) {
+                const Data = {
+                  usn: currentMemberInfo.usn,
+                  pid: currentMemberInfo.pid,
+                  total_amount: msg.amount,
+                  details: depositDetails,
+                };
+                if (window.ws) {
+                  window.ws.send(
+                    JSON.stringify({
+                      action: "deposit_update",
+                      data: Data,
+                    })
+                  );
+                }
+              }
+              // 每收到一次紙鈔就重置倒數
+              startCountdown(btn_continue, 15, "續儲", handleConfirm);
+            } else if (msg.event === "deposit_finalized") {
+              qr_locked = 0;
+              showToast(msg.message || "儲值完成！感謝您的使用。", true);
+              hideDepositModal();
+            } else if (msg.event === "recharge_failed") {
+              modalError.textContent = `錯誤: ${msg.message}`;
+              modalError.style.display = "block";
+            } else if (msg.event === "download_start") {
+              progressTitle.textContent = "正在更新廣告內容";
+              progressMessage.textContent = `準備下載 ${msg.total} 個檔案...`;
+              progressBar.style.width = "0%";
+              progressOverlay.style.display = "flex";
+            } else if (msg.event === "download_progress") {
+              const percentage = Math.round((msg.count / msg.total) * 100);
+              progressMessage.textContent = `正在下載 ${msg.file} (${msg.count}/${msg.total})...`;
+              progressBar.style.width = `${percentage}%`;
+            } else if (msg.event === "device_shift_lock") {
+              qr_locked = parseInt(msg.data, 10);
+              if (qr_locked == 1) {
+                toast2.textContent = "班別結算鎖定中";
+                toast2.style.opacity = "1";
+              } else if (qr_locked == 0) {
+                toast2.style.opacity = "0";
+              }
+            } else if (msg.event === "system_notification") {
+              if (qr_locked == 0) {
+                if (msg.level == "error") {
+                  toast2.textContent = msg.message || "硬體發生錯誤";
+                  toast2.style.opacity = "1";
+                } else if (msg.level == "success") {
+                  toast2.style.opacity = "0";
+                  showToast(msg.message || "硬體已連接", true);
+                }
+              }
+            } else if (msg.event === "config_update_success") {
+              showToast(msg.message || "設定更新成功", true);
+            } else if (msg.event === "config_update_failed") {
+              showToast(msg.message || "設定更新失敗", false);
+            }
+          } catch (e) {
+            console.error("無法解析 WebSocket 訊息:", event.data, e);
+          }
+        };
+        ws.onclose = function () {
+          setTimeout(connect, 3000);
+        };
+        ws.onerror = function (error) {
+          ws.close();
+        };
+        window.ws = ws;
+      }
+
+      connect();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,693 @@
+# /home/maho/kiosk/kiosk.py (適用於 Nginx 的修改版)
+import asyncio
+import json
+# from aiohttp import web, ClientSession # aiohttp.web 不再需要，但 ClientSession 仍用於下載
+from aiohttp import ClientSession
+# from aiohttp.web import Response as web_Response # 已不再需要
+import websockets
+import os
+import sys
+# import mimetypes # 已不再需要
+import paho.mqtt.client as mqtt
+import psutil
+import socket
+import serial
+import serial.tools.list_ports
+import requests
+import re
+
+# --- 全域變數 ---
+CONNECTED_CLIENTS = set()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG = {}
+mqtt_message_queue = asyncio.Queue()
+bill_acceptor = None
+BILL_ACCEPTOR_PORT = None
+BILL_ACCEPTOR_ENABLED = False
+SETTINGS_PATH = os.path.join(BASE_DIR, 'kiosk_settings.json')
+# --- 新增：日誌相關設定 ---
+LOG_FILE_PATH = "/home/maho/kiosk_session.log"
+MAX_LOG_SIZE_MB = 10 # 日誌檔案大小上限 (MB)
+DEVICE_LOCK_STATE = "0"
+
+# --- 載入外部設定檔 ---
+def load_config():
+    global CONFIG
+    config_path = os.path.join(BASE_DIR, 'config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f: CONFIG = json.load(f)
+        print("[Info] config.json 設定檔已成功載入。")
+    except Exception as e:
+        print(f"[Fatal] 讀取設定檔時發生錯誤: {e}", file=sys.stderr)
+        sys.exit(1)
+
+# --- 註解：移除 aiohttp HTTP 伺服器部分 ---
+# Nginx 將會負責提供靜態檔案，這段程式碼不再需要。
+
+# --- API 相關函式 (維持不變) ---
+def get_device_id():
+    """從主機名稱中獲取最後四位數字作為 did"""
+    try:
+        hostname = socket.gethostname()
+        match = re.search(r'(\d{4})$', hostname)
+        if match:
+            did = match.group(1)
+            print(f"[API] 從主機名稱 '{hostname}' 獲取到 did: {did}")
+            return did
+        else:
+            print(f"⚠️ 警告: 無法從主機名稱 '{hostname}' 中找到結尾的四位數字。將使用預設值 '0000'。")
+            return "0000"
+    except Exception as e:
+        print(f"❌ 獲取主機名稱時發生錯誤: {e}")
+        return "0000"
+
+def api_get_member_info(usn, pid, did):
+    """(fn=info) 同步執行會員驗證 API 呼叫"""
+    api_url = CONFIG.get("api_base_url", "https://krt25fa.lajioo.org/rbpanel/api/ad/index.aspx")
+    params = {'fn': 'info', 'usn': usn, 'pid': pid, 'did': did}
+    try:
+        print(f"[API] 正在呼叫會員驗證 API: {api_url} with params {params}")
+        response = requests.get(api_url, params=params, timeout=10)
+        if response.status_code == 200:
+            print("[API] 請求成功！")
+            return response.json()
+        else:
+            print(f"[API] 請求失敗，狀態碼: {response.status_code}")
+            return {"success": False, "message": f"API 錯誤 (Code: {response.status_code})"}
+    except requests.exceptions.RequestException as e:
+        print(f"[API] 網路請求時發生錯誤: {e}")
+        return {"success": False, "message": "網路連線失敗"}
+
+def api_recharge(usn, pid, did, amount):
+    """(fn=recharge) 同步執行點數儲值 API 呼叫"""
+    api_url = CONFIG.get("api_base_url", "https://krt25fa.lajioo.org/rbpanel/api/ad/index.aspx")
+    params = {'fn': 'recharge', 'usn': usn, 'pid': pid, 'did': did, 'recharge': amount}
+    try:
+        print(f"[API] 正在呼叫點數儲值 API: {api_url} with params {params}")
+        response = requests.get(api_url, params=params, timeout=10)
+        if response.status_code == 200:
+            print("[API] 儲值請求成功！")
+            return response.json()
+        else:
+            print(f"[API] 儲值請求失敗，狀態碼: {response.status_code}")
+            return {"success": False, "message": f"API 錯誤 (Code: {response.status_code})"}
+    except requests.exceptions.RequestException as e:
+        print(f"[API] 網路請求時發生錯誤: {e}")
+        return {"success": False, "message": "網路連線失敗"}
+
+def api_recharge_allow(usn, pid, transaction_id, did):
+    """(fn=recharge_allow) 同步執行儲值權限查詢 API 呼叫"""
+    api_url = CONFIG.get("api_base_url", "https://krt25fa.lajioo.org/rbpanel/api/ad/index.aspx")
+    params = {'fn': 'recharge_allow', 'usn': usn, 'pid': pid, 'id': transaction_id, 'did': did}
+    try:
+        print(f"[API] 正在呼叫儲值權限查詢 API: {api_url} with params {params}")
+        response = requests.get(api_url, params=params, timeout=10)
+        if response.status_code == 200:
+            print("[API] 儲值權限查詢成功！")
+            return response.json()
+        else:
+            print(f"[API] 儲值權限查詢失敗，狀態碼: {response.status_code}")
+            return {"success": False, "message": f"API 錯誤 (Code: {response.status_code})"}
+    except requests.exceptions.RequestException as e:
+        print(f"[API] 網路請求時發生錯誤: {e}")
+        return {"success": False, "message": "網路連線失敗"}
+
+# --- WebSocket 核心邏輯 (維持不變) ---
+async def websocket_handler(websocket):
+    CONNECTED_CLIENTS.add(websocket)
+    print(f"[Info] 瀏覽器已連接。")
+    try:
+        async for message in websocket:
+            print(f"[Recv] 收到來自瀏覽器的訊息: {message}")
+            try:
+                data = json.loads(message)
+                action = data.get("action")
+                loop = asyncio.get_running_loop()
+                did = get_device_id()
+
+                if action == "qrcode_scanned":
+                    qr_data = data.get("data")
+                    usn = qr_data.get("usn")
+                    pid = qr_data.get("pid")
+                    
+                    if usn and pid:
+                        member_data = await loop.run_in_executor(None, api_get_member_info, usn, pid, did)
+                        
+                        if member_data and member_data.get("pld"):
+                            valid_data = member_data["pld"]
+                            valid_data['usn'] = usn
+                            valid_data['pid'] = pid
+                            await websocket.send(json.dumps({"event": "member_info_valid", "data": valid_data}))
+                        else:
+                            await websocket.send(json.dumps({"event": "member_info_invalid", "message": member_data.get("message", "無效的會員資料")}))
+                    else:
+                        await websocket.send(json.dumps({"event": "member_info_invalid", "message": "QRCode 格式錯誤"}))
+
+                elif action == "deposit_complete":
+                    disable_bill_acceptor()
+                    # 直接回傳完成訊息關閉視窗
+                    await broadcast({"event": "deposit_finalized", "message": "儲值完成！感謝您的使用。"})
+
+                elif action == "deposit_update":
+                    deposit_data = data.get("data")
+                    if deposit_data:
+                        usn = deposit_data.get("usn")
+                        pid = deposit_data.get("pid")
+                        amount = deposit_data.get("total_amount")
+                        
+                        if usn and pid and amount > 0:
+                            recharge_response = await loop.run_in_executor(None, api_recharge, usn, pid, did, amount)
+                            print(f"[API] 儲值 API 回應: {recharge_response}")
+                            
+                            transaction_id = recharge_response.get('pld', {}).get('id')
+                            if transaction_id:
+                                print(f"[Logic] 取得交易 ID: {transaction_id}，準備確認儲值。")
+                                allow_response = await loop.run_in_executor(None, api_recharge_allow, usn, pid, transaction_id, did)
+                                print(f"[API] 儲值確認 API 回應: {allow_response}")
+                                
+                                if allow_response and allow_response.get("pld"):
+                                     print(f"[Logic] 儲值成功。")
+                                else:
+                                    error_message = allow_response.get("message", "儲值驗證失敗，請聯繫客服。")
+                                    await broadcast({"event": "recharge_failed", "message": error_message})
+                                    print(f"[Logic] 儲值失敗，自動呼叫客服。")
+                            else:
+                                print("[Error] 儲值 API 未回傳交易 ID。")
+                                await broadcast({"event": "recharge_failed", "message": "儲值失敗，無法取得交易序號。"})
+                        else:
+                            print("[Logic] 儲值金額為 0，不執行 API 呼叫。")
+                            await broadcast({"event": "deposit_finalized", "message": "儲值完成！"})
+
+                elif action == "bill_inserted_simulate":
+                    bill_data = data.get("data")
+                    amount = bill_data.get("amount")
+
+                    print(f"[WS] 模擬投入鈔票: usn={usn}, pid={pid}, did={did}, amount={amount}")
+
+                    if amount and amount > 0:
+                        # 這裡直接模擬硬體的 broadcast
+                        await broadcast({
+                            "event": "bill_inserted",
+                            "amount": amount
+                        })
+                
+                elif action == "get_initial_ads":
+                    print("[Logic] 收到前端請求，正在獲取目前廣告列表...")
+                    try:
+                        settings = {}
+                        if os.path.exists(SETTINGS_PATH):
+                            with open(SETTINGS_PATH, 'r', encoding='utf-8') as f: settings = json.load(f)
+                        
+                        durations = settings.get("Durations", {})
+                        marquee_text = settings.get("MarqueeText", "歡迎光臨！")
+                        
+                        ad_list = []
+                        for i in range(1, 6):
+                            found_files = [f for f in os.listdir(BASE_DIR) if f.startswith(str(i) + '.')]
+                            if found_files:
+                                ad_list.append({"file": found_files[0], "duration": durations.get(str(i), 10)})
+                        
+                        await websocket.send(json.dumps({"event": "initial_data", "ads": ad_list, "marqueeText": marquee_text}))
+                    except Exception as e:
+                        print(f"[Error] 獲取初始資料時發生錯誤: {e}", file=sys.stderr)
+                
+                elif action == "user_validated": 
+                    enable_bill_acceptor()
+                elif action == "call_service":
+                    disable_bill_acceptor()
+                    await broadcast({"event": "system_notification", "message": "已呼叫客服，請稍候！"})
+
+                elif action == "get_device_lock_status":
+                    await broadcast({"event": "device_shift_lock", "data": DEVICE_LOCK_STATE})
+
+            except Exception as e:
+                print(f"[Error] 處理訊息時發生錯誤: {e}", file=sys.stderr)
+    finally:
+        CONNECTED_CLIENTS.remove(websocket)
+        print("[Info] 一個瀏覽器已斷開連接。")
+
+async def broadcast(message_payload):
+    if CONNECTED_CLIENTS:
+        message_str = json.dumps(message_payload)
+        await asyncio.gather(*[client.send(message_str) for client in CONNECTED_CLIENTS])
+
+async def download_ads_task(ad_list):
+    print(f"[Downloader] 開始下載廣告，收到的資料: {ad_list}")
+    media_download_url_base = CONFIG.get("media_download_url_base", "")
+    if not media_download_url_base:
+        print("[Error] 設定檔 config.json 中缺少 'media_download_url_base'，無法下載檔案。", file=sys.stderr)
+        return
+
+    total_files = len(ad_list)
+    await broadcast({"event": "download_start", "total": total_files})
+    
+    new_durations = {ad['file'].split('.')[0]: ad['duration'] for ad in ad_list if 'file' in ad and 'duration' in ad}
+    
+    settings = {}
+    if os.path.exists(SETTINGS_PATH):
+        with open(SETTINGS_PATH, 'r', encoding='utf-8') as f: settings = json.load(f)
+    settings["Durations"] = new_durations
+    
+    try:
+        with open(SETTINGS_PATH, 'w', encoding='utf-8') as f: json.dump(settings, f, indent=4)
+        print("[Downloader] 已更新 kiosk_settings.json")
+    except Exception as e:
+        print(f"[Error] 寫入 kiosk_settings.json 時發生錯誤: {e}", file=sys.stderr)
+
+    filenames_to_keep = {ad['file'] for ad in ad_list}
+    
+    current_ad_files = []
+    for i in range(1, 6):
+        found = [f for f in os.listdir(BASE_DIR) if f.startswith(str(i) + '.')]
+        if found: current_ad_files.extend(found)
+
+    for local_file in current_ad_files:
+        if local_file not in filenames_to_keep:
+            try:
+                os.remove(os.path.join(BASE_DIR, local_file))
+                print(f"[Downloader] 已刪除過期檔案: {local_file}")
+            except Exception as e:
+                print(f"[Error] 刪除檔案 {local_file} 時發生錯誤: {e}", file=sys.stderr)
+    
+    downloaded_count = 0
+    async with ClientSession() as session:
+        for ad in ad_list:
+            filename = ad['file']
+            url = media_download_url_base + filename
+            save_path = os.path.join(BASE_DIR, filename)
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        with open(save_path, 'wb') as f: f.write(await response.read())
+                        downloaded_count += 1
+                        print(f"[Downloader] 成功下載: {filename} ({downloaded_count}/{total_files})")
+                        await broadcast({"event": "download_progress", "file": filename, "count": downloaded_count, "total": total_files})
+                    else:
+                        print(f"[Error] 下載失敗 (狀態碼 {response.status}): {url}", file=sys.stderr)
+            except Exception as e:
+                print(f"[Error] 下載時發生網路錯誤 ({url}): {e}", file=sys.stderr)
+    
+    print("[Downloader] 所有廣告下載完成。")
+    await broadcast({"event": "reload_ads", "ads": ad_list})
+
+def get_system_info():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close()
+    except Exception: ip = "N/A"
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f: temp = f"{int(f.read().strip()) / 1000:.1f}"
+    except Exception: temp = "N/A"
+    return { "ip": ip, "cpu_usage": psutil.cpu_percent(), "disk_usage": psutil.disk_usage('/').percent, "cpu_temp": temp, "device_id" : CONFIG.get("kiosk_port") }
+
+async def system_info_task():
+    while True:
+        info = get_system_info()
+        await broadcast({"event": "system_info", "data": info})
+        await asyncio.sleep(5)
+
+async def log_cleanup_task():
+    """定期檢查並清理日誌檔案"""
+    while True:
+        try:
+            if os.path.exists(LOG_FILE_PATH):
+                # 獲取檔案大小 (bytes)
+                file_size = os.path.getsize(LOG_FILE_PATH)
+                max_size_bytes = MAX_LOG_SIZE_MB * 1024 * 1024
+
+                if file_size > max_size_bytes:
+                    print(f"[LogCleanup] 日誌檔案大小 ({file_size / 1024 / 1024:.2f} MB) 已超過 {MAX_LOG_SIZE_MB} MB，進行清理...")
+                    # 讀取最後 1000 行
+                    with open(LOG_FILE_PATH, 'r', encoding='utf-8', errors='ignore') as f:
+                        lines = f.readlines()
+                    
+                    # 將最後 1000 行寫回檔案
+                    with open(LOG_FILE_PATH, 'w', encoding='utf-8') as f:
+                        f.writelines(lines[-1000:])
+                    
+                    print("[LogCleanup] 日誌檔案清理完成。")
+
+        except Exception as e:
+            print(f"[Error] 清理日誌檔案時發生錯誤: {e}", file=sys.stderr)
+
+        # 每 24 小時檢查一次
+        await asyncio.sleep(24 * 60 * 60)
+
+# --- MQTT 訊息佇列處理器 ---
+async def mqtt_message_processor():
+    """從佇列中取出 MQTT 訊息並在主執行緒中處理"""
+
+    # --- 一次性計算好所有主題 ---
+    mqtt_topic_ads_base = CONFIG.get("mqtt_topic_ads", "kiosk/ads/update")
+    mqtt_topic_marquee_base = CONFIG.get("mqtt_topic_marquee", "kiosk/marquee/set")
+    mqtt_topic_notify_base = CONFIG.get("mqtt_topic_notify", "kiosk/system/notify")
+    mqtt_topic_updateport_base = CONFIG.get("mqtt_topic_updatePort", "kiosk/port/update")  # 新增
+    kiosk_port = CONFIG.get("kiosk_port", 6224)
+    dealer_sn = CONFIG.get("dealer_sn")
+    mqtt_topic_device_control = f"node/dealer/{dealer_sn}/shift-locked"
+
+    # 修正：使用 list 而不是 tuple，並加入更多可能的主題格式
+    TOPICS = {
+        "ads": [
+            f"{mqtt_topic_ads_base}/port:{kiosk_port}",  # 特定端口
+            mqtt_topic_ads_base,                         # 廣播
+            f"{mqtt_topic_ads_base}/port:{kiosk_port}"   # 確保格式一致
+        ],
+        "marquee": [
+            f"{mqtt_topic_marquee_base}/port:{kiosk_port}",
+            mqtt_topic_marquee_base
+        ],
+        "notify": [
+            f"{mqtt_topic_notify_base}/port:{kiosk_port}",
+            mqtt_topic_notify_base
+        ],
+        "device":[
+            mqtt_topic_device_control
+        ],
+        "updateport": [  # 新增端口更新主題
+            f"{mqtt_topic_updateport_base}/{kiosk_port}",  # 針對特定端口的更新
+            mqtt_topic_updateport_base  # 廣播更新
+        ]
+    }
+
+    while True:
+        topic, payload_str = await mqtt_message_queue.get()
+        print(f"[Processor] 從佇列中取得訊息: topic='{topic}', payload='{payload_str[:100]}...'")
+        
+        try:
+            # 判斷 Ads 訊息 - 修正判斷邏輯
+            if topic in TOPICS["ads"] or topic.startswith(mqtt_topic_ads_base):
+                print(f"[MQTT] 處理廣告更新訊息...")
+                try:
+                    ad_list = json.loads(payload_str)
+                    if isinstance(ad_list, list):
+                        print(f"[MQTT] 收到 {len(ad_list)} 個廣告檔案")
+                        await download_ads_task(ad_list)
+                    else:
+                        print(f"[MQTT] 廣告資料格式錯誤，預期為 list，收到: {type(ad_list)}")
+                except json.JSONDecodeError as e:
+                    print(f"[Error] 解析廣告 JSON 時發生錯誤: {e}")
+
+            # 判斷 Marquee 訊息
+            elif topic in TOPICS["marquee"] or topic.startswith(mqtt_topic_marquee_base):
+                print(f"[MQTT] 處理跑馬燈訊息: '{payload_str}'")
+                try:
+                    settings = {}
+                    if os.path.exists(SETTINGS_PATH):
+                        with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+                            settings = json.load(f)
+                    settings["MarqueeText"] = payload_str
+                    with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
+                        json.dump(settings, f, indent=4)
+                    print(f"[MQTT] 已將跑馬燈文字儲存至 kiosk_settings.json")
+                except Exception as e:
+                    print(f"[Error] 儲存跑馬燈文字時發生錯誤: {e}", file=sys.stderr)
+                await broadcast({"event": "update_marquee", "text": payload_str})
+
+            # 判斷 Notify 訊息
+            elif topic in TOPICS["notify"] or topic.startswith(mqtt_topic_notify_base):
+                print(f"[MQTT] 處理通知訊息: '{payload_str}'")
+                await broadcast({"event": "system_notification", "message": payload_str})
+            
+            # 處理端口名稱更新訊息
+            elif topic in TOPICS["updateport"] or topic.startswith(mqtt_topic_updateport_base):
+                print(f"[MQTT] 處理端口名稱更新訊息: '{payload_str}'")
+                try:
+                    update_data = json.loads(payload_str)
+                    if (isinstance(update_data, dict) and 
+                        update_data.get("action") == "updatePortName" and
+                        str(update_data.get("old")) == str(kiosk_port)):  # 檢查是否針對當前端口
+                        
+                        new_port = update_data.get("new")
+                        print(f"[MQTT] 當前端口 {kiosk_port} 需要更新為 {new_port}")
+                        
+                        # 更新 CONFIG 檔案
+                        await update_config_port(new_port)
+                        
+                        # 廣播更新事件給前端
+                        await broadcast({
+                            "event": "port_name_updated", 
+                            "old_port": kiosk_port,
+                            "new_port": new_port
+                        })
+                    else:
+                        print(f"[MQTT] 端口更新訊息不是針對當前端口 {kiosk_port}，忽略")
+                        
+                except json.JSONDecodeError as e:
+                    print(f"[Error] 解析端口更新 JSON 時發生錯誤: {e}")
+                except Exception as e:
+                    print(f"[Error] 處理端口更新時發生錯誤: {e}")
+            
+            elif topic in TOPICS["device"]:
+                global DEVICE_LOCK_STATE
+                DEVICE_LOCK_STATE = payload_str
+                if payload_str == "1": disable_bill_acceptor()
+                if payload_str == "0": enable_bill_acceptor()
+                await broadcast({"event": "device_shift_lock", "data": DEVICE_LOCK_STATE})
+                
+            else:
+                print(f"[MQTT] 收到未知主題的訊息: {topic}")
+
+        except Exception as e:
+            print(f"[Error] 處理佇列訊息時發生錯誤: {e}", file=sys.stderr)
+        finally:
+            mqtt_message_queue.task_done()
+
+
+async def update_config_port(new_port):
+    """更新 CONFIG 檔案中的端口號"""
+    try:
+        # 讀取當前 CONFIG 檔案
+        config_file_path = "config.json"  # 請根據實際路徑調整
+        
+        current_config = {}
+        if os.path.exists(config_file_path):
+            with open(config_file_path, 'r', encoding='utf-8') as f:
+                current_config = json.load(f)
+        
+        # 更新端口號
+        current_config["kiosk_port"] = new_port
+        
+        # 寫回檔案
+        with open(config_file_path, 'w', encoding='utf-8') as f:
+            json.dump(current_config, f, indent=4, ensure_ascii=False)
+        
+        # 更新全域 CONFIG 變數
+        global CONFIG
+        CONFIG["kiosk_port"] = new_port
+        
+        print(f"[Config] 成功更新端口號為: {new_port}")
+        
+    except Exception as e:
+        print(f"[Error] 更新 CONFIG 端口時發生錯誤: {e}", file=sys.stderr)
+
+# --- MQTT 客戶端邏輯 ---
+def on_mqtt_message(client, userdata, msg):
+    """回呼函式：只負責將訊息放入佇列"""
+    try:
+        payload_str = msg.payload.decode("utf-8")
+        loop = userdata['loop']
+        loop.call_soon_threadsafe(mqtt_message_queue.put_nowait, (msg.topic, payload_str))
+    except Exception as e:
+        print(f"[Error] 放入佇列時發生錯誤: {e}", file=sys.stderr)
+
+# --- MQTT 客戶端邏輯 ---
+def setup_mqtt_client(loop):
+    client = mqtt.Client()
+    client.user_data_set({'loop': loop})
+    client.on_message = on_mqtt_message
+    # 其他設定保持不變...
+    mqtt_topic_ads_base = CONFIG.get("mqtt_topic_ads", "kiosk/ads/update")
+    mqtt_topic_marquee_base = CONFIG.get("mqtt_topic_marquee", "kiosk/marquee/set")
+    mqtt_topic_notify_base = CONFIG.get("mqtt_topic_notify", "kiosk/system/notify")
+    mqtt_topic_updateport_base = CONFIG.get("mqtt_topic_updatePort", "kiosk/port/update")  # 新增
+    kiosk_port = CONFIG.get("kiosk_port", 6223)
+    dealer_sn = CONFIG.get("dealer_sn")
+    mqtt_topic_device_control = f"node/dealer/{dealer_sn}/shift-locked"
+    
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            print("[MQTT] 成功連接到 Broker")
+            
+            # 訂閱更完整的主題列表
+            topics_to_subscribe = [
+                # 廣告主題
+                (f"{mqtt_topic_ads_base}/port:{kiosk_port}", 0),
+                (mqtt_topic_ads_base, 0),
+                (f"{mqtt_topic_ads_base}/#", 0),
+                
+                # 跑馬燈主題
+                (f"{mqtt_topic_marquee_base}/port:{kiosk_port}", 0),
+                (mqtt_topic_marquee_base, 0),
+                (f"{mqtt_topic_marquee_base}/#", 0),
+                
+                # 通知主題
+                (f"{mqtt_topic_notify_base}/port:{kiosk_port}", 0),
+                (mqtt_topic_notify_base, 0),
+                (f"{mqtt_topic_notify_base}/#", 0),
+
+                # 機台鎖定主題
+                (mqtt_topic_device_control, 0),
+                
+                # 端口更新主題 (新增)
+                (f"{mqtt_topic_updateport_base}/{kiosk_port}", 0),  # 特定端口更新
+                (mqtt_topic_updateport_base, 0),  # 廣播更新
+                (f"{mqtt_topic_updateport_base}/#", 0)  # 萬用字元
+            ]
+            
+            client.subscribe(topics_to_subscribe)
+            print(f"[MQTT] 已訂閱主題: {[t[0] for t in topics_to_subscribe]}")
+        else:
+            print(f"[Error] MQTT 連接失敗，返回碼: {rc}", file=sys.stderr)
+    
+    client.on_connect = on_connect
+    
+    # 其他設定保持不變...
+    def on_message_debug(client, userdata, msg):
+        print(f"[MQTT Debug] 收到訊息 - 主題: '{msg.topic}', 內容長度: {len(msg.payload)} bytes")
+        on_mqtt_message(client, userdata, msg)
+        try:
+            payload_str = msg.payload.decode("utf-8")
+            loop = userdata['loop']
+            loop.call_soon_threadsafe(mqtt_message_queue.put_nowait, (msg.topic, payload_str))
+        except Exception as e:
+            print(f"[Error] 放入佇列時發生錯誤: {e}", file=sys.stderr)
+    
+    client.on_message = on_message_debug
+    
+    try:
+        broker = CONFIG.get("mqtt_broker", "192.168.0.35")
+        port = CONFIG.get("mqtt_port", 1883)
+        user = CONFIG.get("mqtt_user")
+        password = CONFIG.get("mqtt_password")
+        
+        if user and password: 
+            client.username_pw_set(user, password)
+            print(f"[MQTT] 使用認證連接到 {broker}:{port}")
+        else:
+            print(f"[MQTT] 匿名連接到 {broker}:{port}")
+            
+        client.connect(broker, port, 60)
+        client.loop_start()
+        print("[MQTT] 客戶端已啟動")
+    except Exception as e:
+        print(f"[Error] 無法啟動 MQTT 客戶端: {e}", file=sys.stderr)
+    return client
+
+# --- 紙鈔機相關函式 (維持不變) ---
+def find_bill_acceptor_port():
+    global BILL_ACCEPTOR_PORT
+    ports = serial.tools.list_ports.comports()
+    for port in ports:
+        if "USB" in port.device or "ttyUSB" in port.name:
+            BILL_ACCEPTOR_PORT = port.device
+            print(f"[Hardware] 找到紙鈔機於: {BILL_ACCEPTOR_PORT}")
+            return True
+    print("[Warning] 找不到任何 USB 序列埠裝置。紙鈔機功能將停用。", file=sys.stderr)
+    return False
+
+def setup_bill_acceptor():
+    global bill_acceptor
+    if find_bill_acceptor_port():
+        try:
+            bill_acceptor = serial.Serial(
+                port=BILL_ACCEPTOR_PORT, baudrate=9600, bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_EVEN, stopbits=serial.STOPBITS_ONE, timeout=0.1
+            )
+            print("[Hardware] 紙鈔機序列埠已成功開啟。")
+            disable_bill_acceptor()
+        except serial.SerialException as e:
+            print(f"[Error] 無法開啟序列埠 {BILL_ACCEPTOR_PORT}: {e}", file=sys.stderr)
+            bill_acceptor = None
+
+def send_command(command):
+    if bill_acceptor and bill_acceptor.is_open:
+        try:
+            bill_acceptor.write(bytes([command]))
+            print(f"[Hardware] 已發送指令: {hex(command)}")
+        except Exception as e:
+            print(f"[Error] 發送指令時發生錯誤: {e}", file=sys.stderr)
+
+def enable_bill_acceptor():
+    global BILL_ACCEPTOR_ENABLED
+    print("[Hardware] 啟用紙鈔機...")
+    send_command(0x3E)
+    BILL_ACCEPTOR_ENABLED = True
+
+def disable_bill_acceptor():
+    global BILL_ACCEPTOR_ENABLED
+    print("[Hardware] 禁用紙鈔機...")
+    send_command(0x5E)
+    BILL_ACCEPTOR_ENABLED = False
+
+def parse_bill_value(value_byte):
+    bill_values = { 0x40: 100, 0x41: 200, 0x42: 500, 0x43: 1000, 0x44: 2000 }
+    return bill_values.get(value_byte, 0)
+
+async def bill_acceptor_loop():
+    if not bill_acceptor: return
+    while True:
+        try:
+            if bill_acceptor.in_waiting > 0:
+                data_byte = bill_acceptor.read(1)
+                if data_byte:
+                    command = data_byte[0]
+                    print(f"[Hardware] 收到來自紙鈔機的訊息: {hex(command)}")
+                    if command == 0x81:
+                        await asyncio.sleep(0.05)
+                        value_byte_data = bill_acceptor.read(1)
+                        if value_byte_data:
+                            value_byte = value_byte_data[0]
+                            amount = parse_bill_value(value_byte)
+                            print(f"[Hardware] 收到面額: {amount}")
+                            if BILL_ACCEPTOR_ENABLED and amount > 0:
+                                print("[Hardware] 接受鈔票...")
+                                send_command(0x02)
+                                await broadcast({"event": "bill_inserted", "amount": amount})
+                            else:
+                                print("[Hardware] 拒絕鈔票 (系統未啟用或金額為0)...")
+                                send_command(0x0F)
+        except Exception as e:
+            print(f"[Error] 紙鈔機監聽迴圈發生錯誤: {e}", file=sys.stderr)
+        await asyncio.sleep(0.1)
+
+# --- 主程式 ---
+async def main():
+    load_config()
+    loop = asyncio.get_running_loop()
+    mqtt_client = setup_mqtt_client(loop)
+    setup_bill_acceptor()
+    
+    # --- 註解：移除 aiohttp HTTP 伺服器部分 ---
+    # app = web.Application()
+    # app.router.add_get('/{tail:.*}', handle_static_files)
+    # runner = web.AppRunner(app)
+    # await runner.setup()
+    # http_site = web.TCPSite(runner, '0.0.0.0', 8080)
+    
+    # --- 關鍵修改：將日誌清理任務加入背景執行 ---
+    background_tasks = [
+        system_info_task(), 
+        mqtt_message_processor(), 
+        bill_acceptor_loop(),
+        log_cleanup_task()
+    ]
+
+    try:
+        # --- 註解：移除 aiohttp HTTP 伺服器啟動 ---
+        # await http_site.start()
+        # print(f"[OK] HTTP 伺服器已啟動於 http://0.0.0.0:8080")
+        
+        # --- 關鍵修改：讓 WebSocket 只監聽本地連線 ---
+        websocket_server = await websockets.serve(websocket_handler, "127.0.0.1", 8765)
+        print(f"[OK] WebSocket 伺服器已啟動於 ws://127.0.0.1:8765")
+        
+        await asyncio.gather(*background_tasks)
+    except Exception as e:
+        print(f"[Fatal] 伺服器啟動失敗: {e}", file=sys.stderr)
+
+if __name__ == "__main__":
+    try:
+        print("--- 儲值機後端服務啟動 ---")
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n--- 服務已手動關閉 ---")

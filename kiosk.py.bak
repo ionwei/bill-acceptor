@@ -555,7 +555,7 @@ def setup_mqtt_client(loop):
     client.on_message = on_message_debug
     
     try:
-        broker = CONFIG.get("mqtt_broker", "nmtw.lajioo.com")
+        broker = CONFIG.get("mqtt_broker")
         port = CONFIG.get("mqtt_port", 1883)
         user = CONFIG.get("mqtt_user")
         password = CONFIG.get("mqtt_password")

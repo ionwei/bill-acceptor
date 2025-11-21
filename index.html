@@ -518,6 +518,7 @@
         <span>IP: <span id="ip-address">...</span></span>
         <span>CPU: <span id="cpu-usage">...</span>%</span>
         <span>儲存: <span id="disk-usage">...</span>%</span>
+        <span>RAM: <span id="ram-usage">...</span>%</span>
         <span>溫度: <span id="cpu-temp">...</span>°C</span>
         <span>ID: <span id="deviceID">...</span></span>
       </div>
@@ -625,6 +626,7 @@
       const ipAddressEl = document.getElementById("ip-address");
       const cpuUsageEl = document.getElementById("cpu-usage");
       const diskUsageEl = document.getElementById("disk-usage");
+      const ramUsageEl = document.getElementById("ram-usage");
       const cpuTempEl = document.getElementById("cpu-temp");
       const deviceIDEl = document.getElementById("deviceID");
       const depositModal = document.getElementById("deposit-modal");
@@ -864,9 +866,23 @@
             btn.dataset.code = codes[idx];
             btn.onclick = () => {
               if (idx === correctIndex) {
+                btn.style.background =
+                  "linear-gradient(to bottom, #f17676, #f80a0a)";
+                setTimeout(() => {
+                  if (window.ws) {
+                    window.ws.send(
+                      JSON.stringify({
+                        action: "screenshot",
+                      })
+                    );
+                  }
+                }, 200);
                 console.log("✅ 身分確認成功:", codes[idx]);
-                showToast("驗證成功", true);
-                showDepositModal(data);
+                setTimeout(() => {
+                  modal.style.display = "none";
+                  showDepositModal(data);
+                  showToast("驗證成功", true);
+                }, 400);
               } else {
                 console.log("❌ 身分確認錯誤:", codes[idx]);
                 if (window.ws) {
@@ -876,9 +892,9 @@
                     })
                   );
                 }
+                modal.style.display = "none";
                 showToast("身分認證錯誤，請重新登入！");
               }
-              modal.style.display = "none";
             };
           }
         });
@@ -1175,6 +1191,7 @@
               ipAddressEl.textContent = data.ip;
               cpuUsageEl.textContent = data.cpu_usage;
               diskUsageEl.textContent = data.disk_usage;
+              ramUsageEl.textContent = data.ram_usage;
               cpuTempEl.textContent = data.cpu_temp;
               deviceIDEl.textContent = data.device_id;
             } else if (msg.event === "member_info_valid") {

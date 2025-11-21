@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 import csv
 import shutil
 import subprocess
+import glob
+import time
 
 # --- 全域變數 ---
 CONNECTED_CLIENTS = set()
@@ -34,6 +36,8 @@ MAX_LOG_SIZE_MB = 10 # 日誌檔案大小上限 (MB)
 DEVICE_LOCK_STATE = "0"
 QR_LOCk_STATE = "0"
 CURRENT_API_URL = ""
+device_id = None
+hostname = None
 # --- 新增：會員資訊 ---
 current_member = None
 
@@ -192,13 +196,17 @@ def get_device_id():
     try:
         did = CONFIG.get("device_id")
         if did:
+            global device_id
+            device_id = did
             return did
         else:
             print(f"⚠️ 警告: 無法從CONFIG獲取[device_id]。將使用預設值 '0000'。")
-            return "0000"
+            return "機台"
     except Exception as e:
         print(f"❌ 獲取主機名稱時發生錯誤: {e}")
         return "0000"
+    
+device_id = get_device_id()
 
 def api_get_member_info(usn, pid, did):
     """(fn=info) 同步執行會員驗證 API 呼叫"""
@@ -308,7 +316,6 @@ async def handle_qr_code_data(qr_string):
                 await broadcast({"event": "member_info_valid", "data": valid_data})
                 QR_LOCk_STATE = "1" 
                 await asyncio.sleep(0.5)
-                capture_and_save() 
             else:
                 await broadcast({"event": "member_info_invalid", "message": member_data.get("message", "無效的會員資料")})
 
@@ -497,7 +504,7 @@ async def websocket_handler(websocket):
                                         name=name,
                                         total_amount=total_deposit,
                                         point = new_points)
-                    if mqtt_client:
+                    if mqtt_client and mqtt_client.is_connected():
                         mqtt_publish_topic = f"node/player/{pid}/info"
                         mqtt_data = {"points": new_points}
                         mqtt_client.publish(mqtt_publish_topic, json.dumps(mqtt_data))
@@ -649,6 +656,9 @@ async def websocket_handler(websocket):
                         # print(img_b64)
                         await websocket.send(json.dumps({"event": "screenshot_path", "image": f"data:image/png;base64,{img_b64}"}))
 
+                elif action == "screenshot":
+                    capture_and_save()
+
                 elif action == "simulate_transaction_detail":
                     qr_data = data.get("data")
                     await handle_qr_code_data(qr_data)
@@ -776,17 +786,31 @@ async def download_ads_task(ad_list):
 
 # --- 獲取系統資訊的函式 ---
 def get_system_info():
+    global hostname
     try:
         # s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close()
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80)); internal_ip  = s.getsockname()[0]; s.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            internal_ip = s.getsockname()[0]
         last_three = internal_ip.split('.')[-1].zfill(3)
         hostname = socket.gethostname()
         ip = f"{hostname}-{last_three}"
     except Exception: ip = "N/A"
     try:
-        with open("/sys/class/thermal/thermal_zone1/temp") as f: temp = f"{int(f.read().strip()) / 1000:.1f}"
+        temp = "N/A"
+        for zone_path in glob.glob("/sys/class/thermal/thermal_zone*"):
+            try:
+                with open(f"{zone_path}/type") as f_type:
+                    type_name = f_type.read().strip().lower()
+                if "cpu" in type_name:  # 找 CPU zone
+                    with open(f"{zone_path}/temp") as f_temp:
+                        temp_milli = int(f_temp.read().strip())
+                    temp = f"{temp_milli / 1000:.1f}"  # 轉成 °C
+                    break
+            except FileNotFoundError:
+                continue
     except Exception: temp = "N/A"
-    return { "ip": ip, "cpu_usage": psutil.cpu_percent(), "disk_usage": psutil.disk_usage('/').percent, "cpu_temp": temp, "device_id" : CONFIG.get("device_id") }
+    return { "ip": ip, "cpu_usage": psutil.cpu_percent(), "disk_usage": psutil.disk_usage('/').percent, "ram_usage": psutil.virtual_memory().percent, "cpu_temp": temp, "device_id" : CONFIG.get("device_id") }
 
 # --- 定期回報系統資訊的背景任務 ---
 async def system_info_task():
@@ -819,18 +843,20 @@ async def mqtt_message_processor():
     """從佇列中取出 MQTT 訊息並在主執行緒中處理"""
 
     # --- 一次性計算好所有主題 ---
-    mqtt_topic_ads_base = CONFIG.get("mqtt_topic_ads", "kiosk/ads/update")
-    mqtt_topic_marquee_base = CONFIG.get("mqtt_topic_marquee", "kiosk/marquee/set")
-    mqtt_topic_notify_base = CONFIG.get("mqtt_topic_notify", "kiosk/system/notify")
+    dealer_sn = str(CONFIG.get("dealer_sn"))
+    mqtt_topic_ads_base = CONFIG.get("mqtt_topic_ads", "kiosk/ads/update") + "/" + dealer_sn
+    mqtt_topic_marquee_base = CONFIG.get("mqtt_topic_marquee", "kiosk/marquee/set") + "/" + dealer_sn
+    mqtt_topic_notify_base = CONFIG.get("mqtt_topic_notify", "kiosk/system/notify") + "/" + dealer_sn
+    mqtt_topic_updatePort_base = CONFIG.get("mqtt_topic_updatePort", "kiosk/port/update")
+    mqtt_topic_updatePort = f"{mqtt_topic_updatePort_base}/{hostname}/{dealer_sn}"
     device_id = CONFIG.get("device_id", 6223)
-    dealer_sn = CONFIG.get("dealer_sn")
     mqtt_topic_device_control = f"node/dealer/{dealer_sn}/shift-locked"
 
     # 修正：使用 list 而不是 tuple，並加入更多可能的主題格式
     TOPICS = {
         "ads": [
             # f"{mqtt_topic_ads_base}/port:{device_id}",  # 特定端口
-            mqtt_topic_ads_base,                         # 廣播
+            mqtt_topic_ads_base                           # 廣播
         ],
         "marquee": [
             # f"{mqtt_topic_marquee_base}/port:{device_id}",
@@ -842,6 +868,9 @@ async def mqtt_message_processor():
         ],
         "device":[
             mqtt_topic_device_control
+        ],
+        "updatePort":[
+            mqtt_topic_updatePort
         ]
     }
 
@@ -889,7 +918,18 @@ async def mqtt_message_processor():
                 DEVICE_LOCK_STATE = payload_str
                 if payload_str == "1": disable_bill_acceptor()
                 await broadcast({"event": "device_shift_lock", "data": DEVICE_LOCK_STATE})
-                
+            elif topic in TOPICS["updatePort"]:
+                CONFIG["device_id"] = payload_str
+                with open(os.path.join(BASE_DIR, 'config.json'), 'w', encoding='utf-8') as f:
+                    json.dump(CONFIG, f, ensure_ascii=False, indent=4)
+                get_device_id()
+                print(f"[Update device_id]:已將機台名稱更新為 {payload_str}")
+                if mqtt_client and mqtt_client.is_connected():
+                    mqtt_data = {"status":"online", "did": payload_str}
+                    mqtt_client.publish(f"device/{hostname}/status",  json.dumps(mqtt_data, ensure_ascii=False), retain=True)
+                    print(f"[MQTT Publish] 發布主題：device/{hostname}/status, 發布訊息：{mqtt_data}")
+                else:
+                    print("[Error] MQTT 未初始化，無法發佈訊息")
             else:
                 print(f"[MQTT] 收到未知主題的訊息: {topic}")
 
@@ -908,46 +948,64 @@ def on_mqtt_message(client, userdata, msg):
     except Exception as e:
         print(f"[Error] 放入佇列時發生錯誤: {e}", file=sys.stderr)
 
+def wait_for_dns(hostname, timeout=30, retry_interval=2):
+    """等待 DNS 解析可用"""
+    print(f"[MQTT] 檢查 DNS 解析: {hostname}")
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        try:
+            socket.gethostbyname(hostname)
+            print(f"[MQTT] DNS 解析成功")
+            return True
+        except socket.gaierror:
+            print(f"[MQTT] DNS 尚未就緒，{retry_interval}秒後重試...")
+            time.sleep(retry_interval)
+    
+    print(f"[MQTT] DNS 解析超時 ({timeout}秒)")
+    return False
+
 def setup_mqtt_client(loop):
-    client = mqtt.Client()
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    device_id = CONFIG.get("device_id", "機台")
+    mqtt_data = {"status":"offline", "did": device_id}
+    client.will_set(f"device/{hostname}/status", json.dumps(mqtt_data, ensure_ascii=False), retain=True)
     client.user_data_set({'loop': loop})
     client.on_message = on_mqtt_message
     client.on_disconnect = on_disconnect
 
-    mqtt_topic_ads_base = CONFIG.get("mqtt_topic_ads", "kiosk/ads/update")
-    mqtt_topic_marquee_base = CONFIG.get("mqtt_topic_marquee", "kiosk/marquee/set")
-    mqtt_topic_notify_base = CONFIG.get("mqtt_topic_notify", "kiosk/system/notify")
-    device_id = CONFIG.get("device_id", "機台")
-    dealer_sn = CONFIG.get("dealer_sn")
+    dealer_sn = str(CONFIG.get("dealer_sn"))
+    mqtt_topic_ads_base = CONFIG.get("mqtt_topic_ads", "kiosk/ads/update") + "/" + dealer_sn
+    mqtt_topic_marquee_base = CONFIG.get("mqtt_topic_marquee", "kiosk/marquee/set") + "/" + dealer_sn
+    mqtt_topic_notify_base = CONFIG.get("mqtt_topic_notify", "kiosk/system/notify") + "/" + dealer_sn
+    mqtt_topic_updatePort_base = CONFIG.get("mqtt_topic_updatePort", "kiosk/port/update")
+    mqtt_topic_updatePort = f"{mqtt_topic_updatePort_base}/{hostname}/{dealer_sn}"
     mqtt_topic_device_control = f"node/dealer/{dealer_sn}/shift-locked"
     print(mqtt_topic_device_control)
     
-    def on_connect(client, userdata, flags, rc):
-        if rc == 0:
-            print("[MQTT] 成功連接到 Broker")
-            
-            # 訂閱更完整的主題列表
-            topics_to_subscribe = [
-                # 廣告主題
-                # (f"{mqtt_topic_ads_base}/port:{device_id}", 0),  # 特定端口
-                (mqtt_topic_ads_base, 0),                         # 廣播
-                
-                # 跑馬燈主題
-                # (f"{mqtt_topic_marquee_base}/port:{device_id}", 0),
-                (mqtt_topic_marquee_base, 0),
-                
-                # 通知主題
-                # (f"{mqtt_topic_notify_base}/port:{device_id}", 0),
-                (mqtt_topic_notify_base, 0),
-
-                # 機台鎖定主題
-                (mqtt_topic_device_control, 0)
-            ]
-            
-            client.subscribe(topics_to_subscribe)
-            print(f"[MQTT] 已訂閱主題: {[t[0] for t in topics_to_subscribe]}")
-        else:
-            print(f"[Error] MQTT 連接失敗，返回碼: {rc}", file=sys.stderr)
+    def on_connect(client, userdata, flags, reason_code, properties):
+        """VERSION2 格式 - reason_code 是物件而非整數"""
+        # 檢查是否連接失敗
+        if reason_code.is_failure:
+            print(f"[Error] MQTT 連接失敗: {reason_code}", file=sys.stderr)
+            return
+        
+        # 連接成功
+        # 裝置上限通知
+        mqtt_data = {"status":"online", "did": device_id}
+        client.publish(f"device/{hostname}/status",  json.dumps(mqtt_data, ensure_ascii=False), retain=True)
+        print("[MQTT] 成功連接到 Broker")
+        
+        topics_to_subscribe = [
+            (mqtt_topic_ads_base, 0),
+            (mqtt_topic_marquee_base, 0),
+            (mqtt_topic_notify_base, 0),
+            (mqtt_topic_device_control, 0),
+            (mqtt_topic_updatePort, 0)
+        ]
+        
+        client.subscribe(topics_to_subscribe)
+        print(f"[MQTT] 已訂閱主題: {[t[0] for t in topics_to_subscribe]}")
     
     client.on_connect = on_connect
     
@@ -963,7 +1021,11 @@ def setup_mqtt_client(loop):
         port = CONFIG.get("mqtt_port", 1883)
         user = CONFIG.get("mqtt_user")
         password = CONFIG.get("mqtt_password")
-        
+
+        # 等待 DNS 就緒
+        if not wait_for_dns(broker, timeout=60, retry_interval=3):
+            raise Exception(f"無法解析主機名稱: {broker}")
+              
         if user and password: 
             client.username_pw_set(user, password)
             print(f"[MQTT] 使用認證連接到 {broker}:{port}")
@@ -975,10 +1037,14 @@ def setup_mqtt_client(loop):
         print("[MQTT] 客戶端已啟動")
     except Exception as e:
         print(f"[Error] 無法啟動 MQTT 客戶端: {e}", file=sys.stderr)
+        try:
+            client.loop_start()
+        except:
+            pass
     return client
 
-def on_disconnect(client, userdata, rc):
-    print(f"[MQTT] 斷線（rc={rc}），嘗試重新連線中...")
+def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+    print(f"[MQTT] 斷線（reason_code={reason_code}），嘗試重新連線中...")
     loop = userdata.get('loop')
     if loop:
         asyncio.run_coroutine_threadsafe(reconnect_mqtt_loop(client, loop), loop)
@@ -1128,6 +1194,8 @@ mqtt_client = None
 async def main():
     global mqtt_client
     load_config()
+    get_device_id()
+    get_system_info()
     loop = asyncio.get_running_loop()
     mqtt_client = setup_mqtt_client(loop)
     clean_old_screenshot_folders(7)
@@ -1152,6 +1220,8 @@ async def main():
         print(f"[Fatal] 伺服器啟動失敗: {e}", file=sys.stderr)
     finally:
         if mqtt_client:
+            mqtt_data = {"status":"offline", "did": device_id}
+            mqtt_client.publish(f"device/{hostname}/status",  json.dumps(mqtt_data, ensure_ascii=False), retain=True)
             mqtt_client.loop_stop()
             mqtt_client.disconnect()
             print("[MQTT] 已釋放 MQTT 連線")

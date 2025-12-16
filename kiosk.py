@@ -337,16 +337,28 @@ async def handle_qr_code_data(qr_string):
             config_content = {
                 k: base64.b64decode(v).decode("utf-8") if k != "type" else v
                 for k, v in qr_data.items()
+                if k != "type"
             }
+            server_path = config_content.pop("server_path", None)
+            if server_path:
+                config_content.update({
+                    "media_download_url_base": f"{server_path}/kiosk_media/",
+                    "api_base_url": f"{server_path}/rbpanel/api/ad/index.aspx"
+                })
             print(config_content)
             try:
                 global CONFIG
-                config_content.pop("type", None)
                 CONFIG.update(config_content)
                 with open(os.path.join(BASE_DIR, 'config.json'), 'w', encoding='utf-8') as f:
                     json.dump(CONFIG, f, ensure_ascii=False, indent=4)
                 await broadcast({"event": "config_update_success", "message": "設定已更新"})
                 print("[Config] 設定檔已更新")
+                get_device_id()
+                print(f"[Update device_id]:已將機台名稱更新為 {device_id}")
+                if mqtt_client and mqtt_client.is_connected():
+                    mqtt_data = {"status":"online", "did": device_id}
+                    mqtt_client.publish(f"device/{hostname}/status",  json.dumps(mqtt_data, ensure_ascii=False), retain=True)
+                    print(f"[MQTT Publish] 發布主題：device/{hostname}/status, 發布訊息：{mqtt_data}")
             except Exception as e:
                 print(f"[Config] 無法寫入設定檔: {e}")
                 await broadcast({"event": "config_update_failed", "message": "無法寫入設定檔，請確認權限設定。"})
@@ -798,11 +810,12 @@ def get_system_info():
     except Exception: ip = "N/A"
     try:
         temp = "N/A"
+        cpu_zone_types = ["x86_pkg_temp", "cpu_thermal", "cpu-thermal"]
         for zone_path in glob.glob("/sys/class/thermal/thermal_zone*"):
             try:
                 with open(f"{zone_path}/type") as f_type:
                     type_name = f_type.read().strip().lower()
-                if "cpu" in type_name:  # 找 CPU zone
+                if type_name in cpu_zone_types:  # 找 CPU zone
                     with open(f"{zone_path}/temp") as f_temp:
                         temp_milli = int(f_temp.read().strip())
                     temp = f"{temp_milli / 1000:.1f}"  # 轉成 °C
@@ -948,134 +961,326 @@ def on_mqtt_message(client, userdata, msg):
     except Exception as e:
         print(f"[Error] 放入佇列時發生錯誤: {e}", file=sys.stderr)
 
-def wait_for_dns(hostname, timeout=30, retry_interval=2):
-    """等待 DNS 解析可用"""
-    print(f"[MQTT] 檢查 DNS 解析: {hostname}")
-    start_time = time.time()
-    
-    while time.time() - start_time < timeout:
-        try:
-            socket.gethostbyname(hostname)
-            print(f"[MQTT] DNS 解析成功")
-            return True
-        except socket.gaierror:
-            print(f"[MQTT] DNS 尚未就緒，{retry_interval}秒後重試...")
-            time.sleep(retry_interval)
-    
-    print(f"[MQTT] DNS 解析超時 ({timeout}秒)")
-    return False
-
 def setup_mqtt_client(loop):
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    device_id = CONFIG.get("device_id", "機台")
-    mqtt_data = {"status":"offline", "did": device_id}
-    client.will_set(f"device/{hostname}/status", json.dumps(mqtt_data, ensure_ascii=False), retain=True)
-    client.user_data_set({'loop': loop})
-    client.on_message = on_mqtt_message
-    client.on_disconnect = on_disconnect
-
-    dealer_sn = str(CONFIG.get("dealer_sn"))
-    mqtt_topic_ads_base = CONFIG.get("mqtt_topic_ads", "kiosk/ads/update") + "/" + dealer_sn
-    mqtt_topic_marquee_base = CONFIG.get("mqtt_topic_marquee", "kiosk/marquee/set") + "/" + dealer_sn
-    mqtt_topic_notify_base = CONFIG.get("mqtt_topic_notify", "kiosk/system/notify") + "/" + dealer_sn
-    mqtt_topic_updatePort_base = CONFIG.get("mqtt_topic_updatePort", "kiosk/port/update")
-    mqtt_topic_updatePort = f"{mqtt_topic_updatePort_base}/{hostname}/{dealer_sn}"
-    mqtt_topic_device_control = f"node/dealer/{dealer_sn}/shift-locked"
-    print(mqtt_topic_device_control)
+    """建立並設定 MQTT 客戶端"""
+    global hostname, device_id
     
-    def on_connect(client, userdata, flags, reason_code, properties):
-        """VERSION2 格式 - reason_code 是物件而非整數"""
-        # 檢查是否連接失敗
-        if reason_code.is_failure:
-            print(f"[Error] MQTT 連接失敗: {reason_code}", file=sys.stderr)
-            return
+    client_id = hostname
+    print(f"[MQTT] 使用 Client ID: {client_id}")
+    
+    client = mqtt.Client(
+        client_id=client_id,
+        clean_session=True,
+        protocol=mqtt.MQTTv311
+    )
+    
+    client.user_data_set({
+        'loop': loop,
+        'client_id': client_id,
+        'connect_time': 0,
+        'last_ping_time': 0
+    })
+    
+    # === 1. 設定遺囑訊息 (必須在 connect 之前) ===
+    mqtt_data_offline = {
+        "status": "offline",
+        "did": CONFIG.get("device_id", "未知")
+    }
+    
+    will_topic = f"device/{hostname}/status"
+    will_payload = json.dumps(mqtt_data_offline, ensure_ascii=False)
+    
+    client.will_set(
+        will_topic,
+        payload=will_payload,
+        qos=1,
+        retain=True
+    )
+    print(f"[MQTT] 已設定遺囑訊息: {will_topic}")
+    
+    # === 2. TCP Socket 優化 ===
+    def on_socket_open(client, userdata, sock):
+        print("[MQTT] 設定 TCP Socket 參數")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         
-        # 連接成功
-        # 裝置上限通知
-        mqtt_data = {"status":"online", "did": device_id}
-        client.publish(f"device/{hostname}/status",  json.dumps(mqtt_data, ensure_ascii=False), retain=True)
-        print("[MQTT] 成功連接到 Broker")
+        if hasattr(socket, 'TCP_KEEPIDLE'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 6)
         
-        topics_to_subscribe = [
-            (mqtt_topic_ads_base, 0),
-            (mqtt_topic_marquee_base, 0),
-            (mqtt_topic_notify_base, 0),
-            (mqtt_topic_device_control, 0),
-            (mqtt_topic_updatePort, 0)
-        ]
-        
-        client.subscribe(topics_to_subscribe)
-        print(f"[MQTT] 已訂閱主題: {[t[0] for t in topics_to_subscribe]}")
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.settimeout(10)
     
-    client.on_connect = on_connect
+    client.on_socket_open = on_socket_open
     
-    # 加入更詳細的除錯資訊
-    def on_message_debug(client, userdata, msg):
-        print(f"[MQTT Debug] 收到訊息 - 主題: '{msg.topic}', 內容長度: {len(msg.payload)} bytes")
-        on_mqtt_message(client, userdata, msg)
-    
-    client.on_message = on_message_debug
-    
-    try:
-        broker = CONFIG.get("mqtt_broker", "nmtw.lajioo.com")
-        port = CONFIG.get("mqtt_port", 1883)
-        user = CONFIG.get("mqtt_user")
-        password = CONFIG.get("mqtt_password")
-
-        # 等待 DNS 就緒
-        if not wait_for_dns(broker, timeout=60, retry_interval=3):
-            raise Exception(f"無法解析主機名稱: {broker}")
-              
-        if user and password: 
-            client.username_pw_set(user, password)
-            print(f"[MQTT] 使用認證連接到 {broker}:{port}")
-        else:
-            print(f"[MQTT] 匿名連接到 {broker}:{port}")
+    # === 3. 連線成功回呼 ===
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            print(f"[MQTT] ✅ 連線成功")
+            userdata['connect_time'] = time.time()
+            userdata['last_ping_time'] = time.time()
             
-        client.connect(broker, port, 60)
-        client.loop_start()
-        print("[MQTT] 客戶端已啟動")
-    except Exception as e:
-        print(f"[Error] 無法啟動 MQTT 客戶端: {e}", file=sys.stderr)
+            # 取得訂閱主題
+            dealer_sn = str(CONFIG.get("dealer_sn"))
+            mqtt_topic_ads = CONFIG.get("mqtt_topic_ads", "kiosk/ads/update") + "/" + dealer_sn
+            mqtt_topic_marquee = CONFIG.get("mqtt_topic_marquee", "kiosk/marquee/set") + "/" + dealer_sn
+            mqtt_topic_notify = CONFIG.get("mqtt_topic_notify", "kiosk/system/notify") + "/" + dealer_sn
+            mqtt_topic_device_control = f"node/dealer/{dealer_sn}/shift-locked"
+            mqtt_topic_updatePort = f"{CONFIG.get('mqtt_topic_updatePort', 'kiosk/port/update')}/{hostname}/{dealer_sn}"
+            
+            # 訂閱所有主題
+            topics = [
+                (mqtt_topic_ads, 1),
+                (mqtt_topic_marquee, 1),
+                (mqtt_topic_notify, 1),
+                (mqtt_topic_device_control, 1),
+                (mqtt_topic_updatePort, 1)  # ← 加入遺漏的主題
+            ]
+            
+            result, mid = client.subscribe(topics)
+            if result == mqtt.MQTT_ERR_SUCCESS:
+                print(f"[MQTT] 訂閱成功 (mid={mid})")
+                print(f"[MQTT] 訂閱主題:")
+                for topic, qos in topics:
+                    print(f"  - {topic} (QoS={qos})")
+            else:
+                print(f"[MQTT] ❌ 訂閱失敗: {mqtt.error_string(result)}")
+            
+            # 發布 online 狀態
+            mqtt_data_online = {
+                "status": "online",
+                "did": CONFIG.get("device_id", "未知")
+            }
+            
+            client.publish(
+                will_topic,
+                json.dumps(mqtt_data_online, ensure_ascii=False),
+                qos=1,
+                retain=True
+            )
+            print(f"[MQTT] 已發布 online 狀態")
+            
+        else:
+            error_msg = {
+                1: "協議版本不正確",
+                2: "Client ID 被拒絕",
+                3: "伺服器無法使用",
+                4: "帳號密碼錯誤",
+                5: "未授權"
+            }.get(rc, f"未知錯誤 ({rc})")
+            print(f"[MQTT] ❌ 連線失敗: {error_msg}")
+    
+    # === 4. 斷線回呼 (統一版本) ===
+    def on_disconnect(client, userdata, rc):
+        """處理斷線事件 (僅一個版本)"""
+        disconnect_reasons = {
+            0: "正常斷線",
+            1: "協議版本錯誤",
+            2: "Client ID 問題",
+            5: "認證失敗",
+            7: "連線逾時"
+        }
+        reason = disconnect_reasons.get(rc, f"異常斷線 (rc={rc})")
+        
+        if userdata.get('connect_time'):
+            uptime = time.time() - userdata['connect_time']
+            print(f"[MQTT] 🔌 斷線: {reason} (連線時長: {uptime:.0f}秒)")
+        else:
+            print(f"[MQTT] 🔌 斷線: {reason}")
+        
+        # 停止舊的 loop
         try:
-            client.loop_start()
+            client.loop_stop()
         except:
             pass
-    return client
-
-def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
-    print(f"[MQTT] 斷線（reason_code={reason_code}），嘗試重新連線中...")
-    loop = userdata.get('loop')
-    if loop:
-        asyncio.run_coroutine_threadsafe(reconnect_mqtt_loop(client, loop), loop)
-    else:
-        print("[MQTT] 找不到 asyncio loop，無法執行重連。")
-
-# --- 重新連線邏輯 ---
-async def reconnect_mqtt_loop(client, loop):
-    delay = 1  # 初始延遲 
-    MAX_DELAY = 120 # 最大延遲 (兩分鐘)
+        
+        # 觸發重連 (只在異常斷線時)
+        loop = userdata.get('loop')
+        if loop and rc != 0:
+            print("[MQTT] 將嘗試重新連線...")
+            asyncio.run_coroutine_threadsafe(
+                force_recreate_mqtt_connection(loop),
+                loop
+            )
     
-    print("[MQTT] 重連循環已啟動...")
+    # === 5. 訊息回呼 ===
+    def on_message(client, userdata, msg):
+        global mqtt_last_message_time
+        mqtt_last_message_time = time.time()
+        userdata['last_ping_time'] = time.time()
+        
+        print(f"[MQTT] 📩 收到訊息: {msg.topic} ({len(msg.payload)} bytes)")
+        
+        loop = userdata['loop']
+        try:
+            payload_str = msg.payload.decode("utf-8")
+            loop.call_soon_threadsafe(
+                mqtt_message_queue.put_nowait, 
+                (msg.topic, payload_str)
+            )
+        except Exception as e:
+            print(f"[MQTT] ❌ 處理訊息失敗: {e}")
+    
+    # === 6. 其他回呼 ===
+    def on_publish(client, userdata, mid):
+        print(f"[MQTT] 📤 訊息已發布 (mid={mid})")
+    
+    def on_subscribe(client, userdata, mid, granted_qos):
+        print(f"[MQTT] 訂閱確認 (mid={mid}, QoS={granted_qos})")
+    
+    # === 註冊所有回呼 ===
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    client.on_message = on_message
+    client.on_publish = on_publish
+    client.on_subscribe = on_subscribe
+    
+    # === 7. 連線到 Broker ===
+    broker = CONFIG.get("mqtt_broker", "nmtw.lajioo.com")
+    port = CONFIG.get("mqtt_port", 1883)
+    user = CONFIG.get("mqtt_user")
+    password = CONFIG.get("mqtt_password")
+    
+    if user and password:
+        client.username_pw_set(user, password)
+        print(f"[MQTT] 使用認證連線: {user}@{broker}:{port}")
+    else:
+        print(f"[MQTT] ⚠️ 匿名連線: {broker}:{port}")
+    
+    try:
+        client.connect(broker, port, keepalive=30)
+        client.loop_start()
+        print("[MQTT] 客戶端 loop 已啟動")
+        return client
+    except Exception as e:
+        print(f"[MQTT] ❌ 連線失敗: {e}")
+        return None
+
+# === 重建連線 ===
+async def force_recreate_mqtt_connection(loop):
+    """完全重建 MQTT 連線"""
+    global mqtt_client
+    
+    print("[MQTT] 🔄 開始重建連線...")
+    
+    # 清理舊連線
+    if mqtt_client:
+        try:
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+            await asyncio.sleep(2)
+        except Exception as e:
+            print(f"[MQTT] 清理舊連線時發生錯誤: {e}")
+        mqtt_client = None
+    
+    await asyncio.sleep(1)
+    
+    # 嘗試重連
+    delay = 2
+    MAX_DELAY = 60
+    max_attempts = 10
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(f"[MQTT] 嘗試重連 ({attempt}/{max_attempts})...")
+            
+            mqtt_client = setup_mqtt_client(loop)
+            
+            if not mqtt_client:
+                raise Exception("Client 建立失敗")
+            
+            await asyncio.sleep(5)
+            
+            if mqtt_client.is_connected():
+                print("[MQTT] ✅ 重連成功!")
+                await send_system_notification("MQTT 已重新連線", "success")
+                return
+            else:
+                raise Exception("連線未建立")
+                
+        except Exception as e:
+            print(f"[MQTT] ❌ 重連失敗 ({attempt}/{max_attempts}): {e}")
+            
+            if mqtt_client:
+                try:
+                    mqtt_client.loop_stop()
+                except:
+                    pass
+                mqtt_client = None
+            
+            if attempt < max_attempts:
+                await asyncio.sleep(delay)
+                delay = min(delay * 1.5, MAX_DELAY)
+    
+    print("[MQTT] ❌ 達到最大重連次數")
+    await send_system_notification("MQTT 連線失敗,請檢查網路設定", "error")
+
+# === 檢查 ===
+async def mqtt_health_check_loop():
+    """定期檢查 MQTT 連線健康狀態"""
+    global mqtt_client, mqtt_last_message_time
+    
+    CHECK_INTERVAL = 30
+    MESSAGE_TIMEOUT = 300
+    consecutive_failures = 0
+    MAX_FAILURES = 3
     
     while True:
+        await asyncio.sleep(CHECK_INTERVAL)
+        
         try:
-            # 使用 run_in_executor 來避免在 asyncio loop 中阻塞
-            await loop.run_in_executor(None, sync_reconnect, client)
-            print("[MQTT] 已成功重新連線並自動重新訂閱")
-            # 重新啟動背景 loop
-            client.loop_start()
-            return 
+            if not mqtt_client:
+                print("[Health] ❌ Client 不存在")
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_FAILURES:
+                    loop = asyncio.get_running_loop()
+                    await force_recreate_mqtt_connection(loop)
+                    consecutive_failures = 0
+                continue
+            
+            if not mqtt_client.is_connected():
+                print("[Health] ❌ 連線中斷")
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_FAILURES:
+                    loop = asyncio.get_running_loop()
+                    await force_recreate_mqtt_connection(loop)
+                    consecutive_failures = 0
+                continue
+            
+            time_since_message = time.time() - mqtt_last_message_time
+            if time_since_message > MESSAGE_TIMEOUT:
+                print(f"[Health] ⚠️ {int(time_since_message)}秒 沒收到訊息")
+                
+                try:
+                    result = mqtt_client.publish(
+                        f"kiosk/ping/{hostname}",
+                        payload=f"{int(time.time())}",
+                        qos=1
+                    )
+                    
+                    if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                        print(f"[Health] ❌ Ping 失敗")
+                        consecutive_failures += 1
+                    else:
+                        print("[Health] ✅ Ping 成功")
+                        consecutive_failures = 0
+                        
+                except Exception as e:
+                    print(f"[Health] ❌ Ping 異常: {e}")
+                    consecutive_failures += 1
+            else:
+                consecutive_failures = 0
+                print(f"[Health] ✅ 正常 (最後訊息: {int(time_since_message)}秒前)")
+            
+            if consecutive_failures >= MAX_FAILURES:
+                print(f"[Health] ❌ 連續 {consecutive_failures} 次失敗,強制重連")
+                loop = asyncio.get_running_loop()
+                await force_recreate_mqtt_connection(loop)
+                consecutive_failures = 0
+                
         except Exception as e:
-            print(f"[Error] MQTT 重連失敗 (將在 {delay} 秒後重試): {e}")
-            await asyncio.sleep(delay)
-            # 嘗試重新連現實間，指數退避
-            delay = min(delay * 2, MAX_DELAY)
-
-# 將 client.reconnect 包裝成一個同步函式，供 executor 呼叫
-def sync_reconnect(client):
-    """同步地呼叫 MQTT 客戶端的 reconnect 方法"""
-    client.reconnect()
+            print(f"[Health] 檢查錯誤: {e}")
+            consecutive_failures += 1
 
 # --- 紙鈔機相關函式 ---
 def find_cp210x_port():
@@ -1199,13 +1404,14 @@ async def main():
     loop = asyncio.get_running_loop()
     mqtt_client = setup_mqtt_client(loop)
     clean_old_screenshot_folders(7)
-    # asyncio.create_task(test_disconnect_loop(mqtt_client, interval=15)) # MQTT斷線測試
+    asyncio.create_task(test_disconnect_loop(mqtt_client, interval=15)) # MQTT斷線測試
 
     
     # --- 關鍵修改：將日誌清理任務加入背景執行 ---
     background_tasks = [
         system_info_task(), 
-        mqtt_message_processor(), 
+        mqtt_message_processor(),
+        mqtt_health_check_loop(), 
         bill_acceptor_loop(),
         qrcode_scanner_loop(),
         log_cleanup_task(),
@@ -1219,12 +1425,21 @@ async def main():
     except Exception as e:
         print(f"[Fatal] 伺服器啟動失敗: {e}", file=sys.stderr)
     finally:
-        if mqtt_client:
-            mqtt_data = {"status":"offline", "did": device_id}
-            mqtt_client.publish(f"device/{hostname}/status",  json.dumps(mqtt_data, ensure_ascii=False), retain=True)
-            mqtt_client.loop_stop()
-            mqtt_client.disconnect()
-            print("[MQTT] 已釋放 MQTT 連線")
+        if mqtt_client and mqtt_client.is_connected():
+            try:
+                mqtt_data = {"status": "offline", "did": device_id}
+                mqtt_client.publish(
+                    f"device/{hostname}/status",
+                    json.dumps(mqtt_data, ensure_ascii=False),
+                    qos=1,
+                    retain=True
+                )
+                time.sleep(0.5)
+                mqtt_client.loop_stop()
+                mqtt_client.disconnect()
+                print("[MQTT] 已正常關閉連線")
+            except Exception as e:
+                print(f"[MQTT] 關閉時發生錯誤: {e}")
 
 if __name__ == "__main__":
     try:

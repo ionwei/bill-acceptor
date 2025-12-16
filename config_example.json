@@ -1,0 +1,14 @@
+{
+  "mqtt_broker": "xxx.xxx.com",
+  "mqtt_port": 1883,
+  "mqtt_user": "!#@$%^&*",
+  "mqtt_password": "!#@$%^&*",
+  "mqtt_topic_ads": "kiosk/ads/update",
+  "mqtt_topic_marquee": "kiosk/marquee/set",
+  "mqtt_topic_notify": "kiosk/system/notify",
+  "mqtt_topic_updatePort": "kiosk/port/update",
+  "media_download_url_base": "https://xxx.xxx.com/xx/",
+  "device_id": "DEVICE XXX",
+  "api_base_url": "https://xxx.xxx.com/xx/xx/xx/index.aspx",
+  "dealer_sn": x
+}

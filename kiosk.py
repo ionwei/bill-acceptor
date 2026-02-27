@@ -200,10 +200,10 @@ def get_device_id():
             device_id = did
             return did
         else:
-            print(f"⚠️ 警告: 無法從CONFIG獲取[device_id]。將使用預設值 '0000'。")
+            print(f"警告: 無法從CONFIG獲取[device_id]。將使用預設值 '0000'。")
             return "機台"
     except Exception as e:
-        print(f"❌ 獲取主機名稱時發生錯誤: {e}")
+        print(f"獲取主機名稱時發生錯誤: {e}")
         return "0000"
     
 device_id = get_device_id()
@@ -1068,7 +1068,7 @@ def setup_mqtt_client(loop):
                 4: "帳號密碼錯誤",
                 5: "未授權"
             }.get(rc, f"未知錯誤 ({rc})")
-            print(f"[MQTT] ❌ 連線失敗: {error_msg}")
+            print(f"[MQTT] 連線失敗: {error_msg}")
     
     # === 4. 斷線回呼 (統一版本) ===
     def on_disconnect(client, userdata, rc):
@@ -1084,9 +1084,9 @@ def setup_mqtt_client(loop):
         
         if userdata.get('connect_time'):
             uptime = time.time() - userdata['connect_time']
-            print(f"[MQTT] 🔌 斷線: {reason} (連線時長: {uptime:.0f}秒)")
+            print(f"[MQTT] 斷線: {reason} (連線時長: {uptime:.0f}秒)")
         else:
-            print(f"[MQTT] 🔌 斷線: {reason}")
+            print(f"[MQTT] 斷線: {reason}")
         
         # 停止舊的 loop
         try:
@@ -1109,7 +1109,7 @@ def setup_mqtt_client(loop):
         mqtt_last_message_time = time.time()
         userdata['last_ping_time'] = time.time()
         
-        print(f"[MQTT] 📩 收到訊息: {msg.topic} ({len(msg.payload)} bytes)")
+        print(f"[MQTT] 收到訊息: {msg.topic} ({len(msg.payload)} bytes)")
         
         loop = userdata['loop']
         try:
@@ -1119,11 +1119,11 @@ def setup_mqtt_client(loop):
                 (msg.topic, payload_str)
             )
         except Exception as e:
-            print(f"[MQTT] ❌ 處理訊息失敗: {e}")
+            print(f"[MQTT] 處理訊息失敗: {e}")
     
     # === 6. 其他回呼 ===
     def on_publish(client, userdata, mid):
-        print(f"[MQTT] 📤 訊息已發布 (mid={mid})")
+        print(f"[MQTT] 訊息已發布 (mid={mid})")
     
     def on_subscribe(client, userdata, mid, granted_qos):
         print(f"[MQTT] 訂閱確認 (mid={mid}, QoS={granted_qos})")
@@ -1145,7 +1145,7 @@ def setup_mqtt_client(loop):
         client.username_pw_set(user, password)
         print(f"[MQTT] 使用認證連線: {user}@{broker}:{port}")
     else:
-        print(f"[MQTT] ⚠️ 匿名連線: {broker}:{port}")
+        print(f"[MQTT] 匿名連線: {broker}:{port}")
     
     try:
         client.connect(broker, port, keepalive=30)
@@ -1153,7 +1153,7 @@ def setup_mqtt_client(loop):
         print("[MQTT] 客戶端 loop 已啟動")
         return client
     except Exception as e:
-        print(f"[MQTT] ❌ 連線失敗: {e}")
+        print(f"[MQTT] 連線失敗: {e}")
         return None
 
 # === 重建連線 ===
@@ -1192,14 +1192,14 @@ async def force_recreate_mqtt_connection(loop):
             await asyncio.sleep(5)
             
             if mqtt_client.is_connected():
-                print("[MQTT] ✅ 重連成功!")
+                print("[MQTT] 重連成功!")
                 await send_system_notification("MQTT 已重新連線", "success")
                 return
             else:
                 raise Exception("連線未建立")
                 
         except Exception as e:
-            print(f"[MQTT] ❌ 重連失敗 ({attempt}/{max_attempts}): {e}")
+            print(f"[MQTT] 重連失敗 ({attempt}/{max_attempts}): {e}")
             
             if mqtt_client:
                 try:
@@ -1212,7 +1212,7 @@ async def force_recreate_mqtt_connection(loop):
                 await asyncio.sleep(delay)
                 delay = min(delay * 1.5, MAX_DELAY)
     
-    print("[MQTT] ❌ 達到最大重連次數")
+    print("[MQTT] 達到最大重連次數")
     await send_system_notification("MQTT 連線失敗,請檢查網路設定", "error")
 
 # === 檢查 ===
@@ -1230,7 +1230,7 @@ async def mqtt_health_check_loop():
         
         try:
             if not mqtt_client:
-                print("[Health] ❌ Client 不存在")
+                print("[Health] Client 不存在")
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_FAILURES:
                     loop = asyncio.get_running_loop()
@@ -1239,7 +1239,7 @@ async def mqtt_health_check_loop():
                 continue
             
             if not mqtt_client.is_connected():
-                print("[Health] ❌ 連線中斷")
+                print("[Health] 連線中斷")
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_FAILURES:
                     loop = asyncio.get_running_loop()
@@ -1249,7 +1249,7 @@ async def mqtt_health_check_loop():
             
             time_since_message = time.time() - mqtt_last_message_time
             if time_since_message > MESSAGE_TIMEOUT:
-                print(f"[Health] ⚠️ {int(time_since_message)}秒 沒收到訊息")
+                print(f"[Health] {int(time_since_message)}秒 沒收到訊息")
                 
                 try:
                     result = mqtt_client.publish(
@@ -1259,21 +1259,21 @@ async def mqtt_health_check_loop():
                     )
                     
                     if result.rc != mqtt.MQTT_ERR_SUCCESS:
-                        print(f"[Health] ❌ Ping 失敗")
+                        print(f"[Health] Ping 失敗")
                         consecutive_failures += 1
                     else:
-                        print("[Health] ✅ Ping 成功")
+                        print("[Health] Ping 成功")
                         consecutive_failures = 0
                         
                 except Exception as e:
-                    print(f"[Health] ❌ Ping 異常: {e}")
+                    print(f"[Health] Ping 異常: {e}")
                     consecutive_failures += 1
             else:
                 consecutive_failures = 0
-                print(f"[Health] ✅ 正常 (最後訊息: {int(time_since_message)}秒前)")
+                print(f"[Health] 正常 (最後訊息: {int(time_since_message)}秒前)")
             
             if consecutive_failures >= MAX_FAILURES:
-                print(f"[Health] ❌ 連續 {consecutive_failures} 次失敗,強制重連")
+                print(f"[Health] 連續 {consecutive_failures} 次失敗,強制重連")
                 loop = asyncio.get_running_loop()
                 await force_recreate_mqtt_connection(loop)
                 consecutive_failures = 0

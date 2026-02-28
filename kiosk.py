@@ -1,4 +1,3 @@
-# /var/www/html/kiosk/kiosk.py (最終完整版 - 新增日誌清理)
 import asyncio
 import json
 import base64
@@ -30,7 +29,7 @@ bill_acceptor = None
 BILL_ACCEPTOR_PORT = None
 BILL_ACCEPTOR_ENABLED = False
 SETTINGS_PATH = os.path.join(BASE_DIR, 'kiosk_settings.json')
-# --- 新增：日誌相關設定 ---
+# --- 日誌相關設定 ---
 LOG_FILE_PATH = "/home/maho/kiosk_session.log"
 MAX_LOG_SIZE_MB = 10 # 日誌檔案大小上限 (MB)
 DEVICE_LOCK_STATE = "0"
@@ -38,7 +37,7 @@ QR_LOCk_STATE = "0"
 CURRENT_API_URL = ""
 device_id = None
 hostname = None
-# --- 新增：會員資訊 ---
+# --- 會員資訊 ---
 current_member = None
 
 # 交易日誌設定
@@ -109,7 +108,7 @@ def write_transaction_log(log_type, **kwargs):
         with open(log_file, "a", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             if not file_exists:
-                # 統一表頭，涵蓋所有可能的欄位
+                # 統一表頭
                 writer.writerow([
                     "時間", "記錄類型", "會員帳號", "會員名稱", "USN", "PID", 
                     "交易ID", "金額", "狀態", "備註", "api_url"
@@ -279,7 +278,7 @@ def api_get_transaction_detail(usn, pid, strDate, endDate, did):
         print(f"[API] 網路請求時發生錯誤: {e}")
         return {"success": False, "message": "網路連線失敗"}
     
-# --- QRCode 資料處理函式 (共用邏輯) ---
+# --- QRCode資料處理 ---
 async def handle_qr_code_data(qr_string):
     global DEVICE_LOCK_STATE, current_member, QR_LOCk_STATE
     if DEVICE_LOCK_STATE == "1" or QR_LOCk_STATE == "1":
@@ -371,7 +370,7 @@ async def handle_qr_code_data(qr_string):
         print(f"[QRCode] 處理時發生未知錯誤: {e}")
         await broadcast({"event": "member_info_invalid", "message": "處理 QRCode 時發生錯誤"})
 
-# 模擬
+# 模擬Qrcode掃描
 async def simulate_handle_qr_code_data(usn, pid, strDate, endDate, did):
     loop = asyncio.get_running_loop()
     transaction_detail_data = await loop.run_in_executor(None, api_get_transaction_detail, usn, pid, strDate, endDate, did)
@@ -386,7 +385,7 @@ async def simulate_handle_qr_code_data(usn, pid, strDate, endDate, did):
 
 
 # 儲存截圖
-USER_ID = "1000"  # 您的使用者 ID
+USER_ID = "1000"  
 def capture_and_save(filename = None):
     now = datetime.now()
 
@@ -403,7 +402,6 @@ def capture_and_save(filename = None):
 
     my_env = os.environ.copy()
     my_env["XDG_RUNTIME_DIR"] = f"/run/user/{USER_ID}"
-    # 根據您的測試結果，修正為 'wayland-1'
     my_env["WAYLAND_DISPLAY"] = "wayland-1"
 
     try:
@@ -444,7 +442,7 @@ def clean_old_screenshot_folders(days=7):
                 shutil.rmtree(folder_path)
                 print(f"[{now}] 已刪除舊資料夾: {folder_path}")
 
-# --- WebSocket 核心邏輯 ---
+# --- WebSocket ---
 async def websocket_handler(websocket):
     CONNECTED_CLIENTS.add(websocket)
     print(f"[Info] 瀏覽器已連接。")
@@ -464,13 +462,13 @@ async def websocket_handler(websocket):
                     points = total_deposit_data.get("points", 0)
                     points = int(points.replace(",", ""))
                     
-                    # 1. 基本驗證：檢查 current_member
+                    # 基本驗證：檢查 current_member
                     if not current_member or current_member.get('pid') != pid:
                         print(f"[Error] 會員驗證失敗: 期望 {pid}, 實際 {current_member.get('pid') if current_member else 'None'}")
                         await broadcast({"event": "recharge_failed", "message": "會員驗證失敗，請重新掃描QRCode"})
                         return
                     
-                    # 2. 重新驗證會員資料（與 deposit_update 相同）
+                    # 重新驗證會員資料（與 deposit_update 相同）
                     try:
                         usn = current_member.get('usn')
                         did = get_device_id()
@@ -499,7 +497,7 @@ async def websocket_handler(websocket):
                         disable_bill_acceptor()
                         return
                     
-                    # 3. 驗證通過後執行完成邏輯
+                    # 驗證通過後執行完成邏輯
                     account = current_member.get('acc', 'N/A')
                     name = current_member.get('name', 'N/A')
                     usn = current_member.get('usn')
@@ -542,7 +540,7 @@ async def websocket_handler(websocket):
                         pid = deposit_data.get("pid")
                         amount = deposit_data.get("total_amount")
                         
-                        # 1. 比對current_member跟前端傳來的會員資料
+                        # 比對current_member跟前端傳來的會員資料
                         if not current_member or not (current_member.get('usn') == usn and current_member.get('pid') == pid):
                             print(f"[Error] 儲值時會員驗證失敗: 期望 {usn}/{pid}, 實際 {current_member}")
                             await broadcast({"event": "recharge_failed", "message": "會員身份驗證失敗，儲值已取消"})
@@ -550,7 +548,7 @@ async def websocket_handler(websocket):
                             disable_bill_acceptor()
                             return
                         
-                         # 2. 再請求一次API跟current_member比對
+                         # 再請求一次API跟current_member比對
                         try:
                             did = get_device_id()
                             fresh_member_data = await loop.run_in_executor(None, api_get_member_info, usn, pid, did)
@@ -578,7 +576,7 @@ async def websocket_handler(websocket):
                             disable_bill_acceptor()
                             return
                         
-                        # 3. 驗證通過後執行儲值
+                        # 驗證通過後執行儲值
                         if usn and pid and amount > 0:
                             recharge_response = await loop.run_in_executor(None, api_recharge, usn, pid, did, amount)
                             print(f"[API] 儲值 API 回應: {recharge_response}")
@@ -684,7 +682,7 @@ async def websocket_handler(websocket):
         CONNECTED_CLIENTS.remove(websocket)
         print("[Info] 一個瀏覽器已斷開連接。")
 
-# --- 序列埠掃描器 (非阻塞修正版) ---
+# --- 掃描器 ---
 def find_ch340_port():
     ports = serial.tools.list_ports.comports()
     for port in ports:
@@ -725,7 +723,7 @@ async def qrcode_scanner_loop():
             print(f"[Scanner] 監聽迴圈發生未知錯誤: {e}", file=sys.stderr)
             await asyncio.sleep(5)
 
-# --- 通用通知函式 ---
+# --- 通知函式 ---
 async def broadcast(message_payload):
     if CONNECTED_CLIENTS:
         message_str = json.dumps(message_payload)
@@ -825,14 +823,14 @@ def get_system_info():
     except Exception: temp = "N/A"
     return { "ip": ip, "cpu_usage": psutil.cpu_percent(), "disk_usage": psutil.disk_usage('/').percent, "ram_usage": psutil.virtual_memory().percent, "cpu_temp": temp, "device_id" : CONFIG.get("device_id") }
 
-# --- 定期回報系統資訊的背景任務 ---
+# --- 定期回報系統資訊 ---
 async def system_info_task():
     while True:
         info = get_system_info()
         await broadcast({"event": "system_info", "data": info})
         await asyncio.sleep(5)
 
-# --- 新增：日誌清理背景任務 ---
+# --- 定期清理日誌 ---
 async def log_cleanup_task():
     """啟動時清理 LOG_DIR 下超過兩個月的日誌檔案"""
     RETAIN_DAYS = 60  # 近兩個月
@@ -851,11 +849,11 @@ async def log_cleanup_task():
     except Exception as e:
         print(f"[Error] 清理日誌時發生錯誤: {e}", file=sys.stderr)
 
-# --- MQTT 訊息佇列處理器 ---
+# --- MQTT訊息處理 ---
 async def mqtt_message_processor():
     """從佇列中取出 MQTT 訊息並在主執行緒中處理"""
 
-    # --- 一次性計算好所有主題 ---
+    # --- 所有主題 ---
     dealer_sn = str(CONFIG.get("dealer_sn"))
     mqtt_topic_ads_base = CONFIG.get("mqtt_topic_ads", "kiosk/ads/update") + "/" + dealer_sn
     mqtt_topic_marquee_base = CONFIG.get("mqtt_topic_marquee", "kiosk/marquee/set") + "/" + dealer_sn
@@ -865,7 +863,7 @@ async def mqtt_message_processor():
     device_id = CONFIG.get("device_id", 6223)
     mqtt_topic_device_control = f"node/dealer/{dealer_sn}/shift-locked"
 
-    # 修正：使用 list 而不是 tuple，並加入更多可能的主題格式
+    # 使用list而不是tuple，並加入更多可能的主題格式
     TOPICS = {
         "ads": [
             # f"{mqtt_topic_ads_base}/port:{device_id}",  # 特定端口
@@ -892,7 +890,7 @@ async def mqtt_message_processor():
         print(f"[Processor] 從佇列中取得訊息: topic='{topic}', payload='{payload_str[:100]}...'")
         
         try:
-            # 判斷 Ads 訊息 - 修正判斷邏輯
+            # 判斷 Ads 訊息
             if topic in TOPICS["ads"]:
                 print(f"[MQTT] 處理廣告更新訊息...")
                 try:
@@ -981,7 +979,7 @@ def setup_mqtt_client(loop):
         'last_ping_time': 0
     })
     
-    # === 1. 設定遺囑訊息 (必須在 connect 之前) ===
+    # 設定遺囑訊息(connect之前)
     mqtt_data_offline = {
         "status": "offline",
         "did": CONFIG.get("device_id", "未知")
@@ -998,7 +996,7 @@ def setup_mqtt_client(loop):
     )
     print(f"[MQTT] 已設定遺囑訊息: {will_topic}")
     
-    # === 2. TCP Socket 優化 ===
+    # TCP Socket 優化
     def on_socket_open(client, userdata, sock):
         print("[MQTT] 設定 TCP Socket 參數")
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
@@ -1013,7 +1011,7 @@ def setup_mqtt_client(loop):
     
     client.on_socket_open = on_socket_open
     
-    # === 3. 連線成功回呼 ===
+    # 連線成功回呼
     def on_connect(client, userdata, flags, rc):
         if rc == 0:
             print(f"[MQTT] ✅ 連線成功")
@@ -1034,7 +1032,7 @@ def setup_mqtt_client(loop):
                 (mqtt_topic_marquee, 1),
                 (mqtt_topic_notify, 1),
                 (mqtt_topic_device_control, 1),
-                (mqtt_topic_updatePort, 1)  # ← 加入遺漏的主題
+                (mqtt_topic_updatePort, 1)  # 加入遺漏的主題
             ]
             
             result, mid = client.subscribe(topics)
@@ -1044,7 +1042,7 @@ def setup_mqtt_client(loop):
                 for topic, qos in topics:
                     print(f"  - {topic} (QoS={qos})")
             else:
-                print(f"[MQTT] ❌ 訂閱失敗: {mqtt.error_string(result)}")
+                print(f"[MQTT] 訂閱失敗: {mqtt.error_string(result)}")
             
             # 發布 online 狀態
             mqtt_data_online = {
@@ -1070,7 +1068,7 @@ def setup_mqtt_client(loop):
             }.get(rc, f"未知錯誤 ({rc})")
             print(f"[MQTT] 連線失敗: {error_msg}")
     
-    # === 4. 斷線回呼 (統一版本) ===
+    # 斷線回呼
     def on_disconnect(client, userdata, rc):
         """處理斷線事件 (僅一個版本)"""
         disconnect_reasons = {
@@ -1088,7 +1086,7 @@ def setup_mqtt_client(loop):
         else:
             print(f"[MQTT] 斷線: {reason}")
         
-        # 停止舊的 loop
+        # 停止舊的loop
         try:
             client.loop_stop()
         except:
@@ -1103,7 +1101,7 @@ def setup_mqtt_client(loop):
                 loop
             )
     
-    # === 5. 訊息回呼 ===
+    # 訊息回呼
     def on_message(client, userdata, msg):
         global mqtt_last_message_time
         mqtt_last_message_time = time.time()
@@ -1121,21 +1119,21 @@ def setup_mqtt_client(loop):
         except Exception as e:
             print(f"[MQTT] 處理訊息失敗: {e}")
     
-    # === 6. 其他回呼 ===
+    # 其他回呼
     def on_publish(client, userdata, mid):
         print(f"[MQTT] 訊息已發布 (mid={mid})")
     
     def on_subscribe(client, userdata, mid, granted_qos):
         print(f"[MQTT] 訂閱確認 (mid={mid}, QoS={granted_qos})")
     
-    # === 註冊所有回呼 ===
+    # 註冊所有回呼
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
     client.on_message = on_message
     client.on_publish = on_publish
     client.on_subscribe = on_subscribe
     
-    # === 7. 連線到 Broker ===
+    # 連線到 Broker
     broker = CONFIG.get("mqtt_broker", "nmtw.lajioo.com")
     port = CONFIG.get("mqtt_port", 1883)
     user = CONFIG.get("mqtt_user")
@@ -1156,7 +1154,7 @@ def setup_mqtt_client(loop):
         print(f"[MQTT] 連線失敗: {e}")
         return None
 
-# === 重建連線 ===
+# 重建連線 
 async def force_recreate_mqtt_connection(loop):
     """完全重建 MQTT 連線"""
     global mqtt_client
@@ -1215,11 +1213,9 @@ async def force_recreate_mqtt_connection(loop):
     print("[MQTT] 達到最大重連次數")
     await send_system_notification("MQTT 連線失敗,請檢查網路設定", "error")
 
-# === 檢查 ===
+# 檢查 MQTT 連線健康狀態
 async def mqtt_health_check_loop():
-    """定期檢查 MQTT 連線健康狀態"""
     global mqtt_client, mqtt_last_message_time
-    
     CHECK_INTERVAL = 30
     MESSAGE_TIMEOUT = 300
     consecutive_failures = 0
@@ -1339,7 +1335,7 @@ async def bill_acceptor_loop():
                     if value_byte_data:
                         amount = parse_bill_value(value_byte_data[0])
                         if BILL_ACCEPTOR_ENABLED and amount > 0:
-                            # 簡化驗證：直接檢查 current_member
+                            # 直接檢查 current_member
                             if not current_member:
                                 print("[Error] 沒有登入的會員，拒絕收錢")
                                 send_command(0x0F)  # 拒絕紙鈔
